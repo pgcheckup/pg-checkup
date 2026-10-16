@@ -189,7 +189,7 @@ export const DEFS: Def[] = [
   { id: "r_slots", section: "replication", title: "Replication slots", source: "pg_replication_slots", limit: 20,
     description: "An inactive slot forces Postgres to keep WAL it hasn't delivered, which can fill the disk.",
     columns: [C("slot", "Slot", "mono"), C("type", "Type"), C("active", "Active", "bool"), C("status", "WAL status"), C("retained_bytes", "WAL retained", "bytes", { warn: 1_073_741_824, bad: 5_368_709_120 }), C("plugin", "Plugin", "mono")],
-    sql: () => `select slot_name::text as slot, slot_type as type, active, wal_status as status,
+    sql: (c) => `select slot_name::text as slot, slot_type as type, active, ${c.version >= 130000 ? "wal_status" : "null::text"} as status,
       pg_wal_lsn_diff(case when pg_is_in_recovery() then pg_last_wal_replay_lsn() else pg_current_wal_lsn() end, restart_lsn)::bigint as retained_bytes, coalesce(plugin::text, '') as plugin
       from pg_replication_slots order by retained_bytes desc nulls last limit 20` },
   { id: "r_standby", section: "replication", title: "Standby lag", source: "pg_stat_replication", limit: 20,
@@ -198,7 +198,7 @@ export const DEFS: Def[] = [
     sql: () => `select coalesce(application_name, '') as standby, coalesce(client_addr::text, '') as addr, state, sync_state as sync,
       pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)::bigint as replay_bytes, round(extract(epoch from replay_lag)::numeric, 2) as replay_lag_s, round(extract(epoch from flush_lag)::numeric, 2) as flush_lag_s
       from pg_stat_replication order by replay_bytes desc nulls last limit 20` },
-  { id: "r_walstats", section: "replication", title: "WAL generated", source: "pg_stat_wal", layout: "kv", limit: 1,
+  { id: "r_walstats", section: "replication", title: "WAL generated", source: "pg_stat_wal", layout: "kv", limit: 1, minPg: 140000,
     description: "WAL volume since the stats reset.",
     columns: [C("wal_bytes", "WAL written", "bytes"), C("wal_records", "Records", "int"), C("wal_fpi", "Full-page images", "int"), C("wal_buffers_full", "Buffer-full writes", "int"), C("stats_reset", "Since", "ts")],
     sql: () => `select wal_bytes::bigint as wal_bytes, wal_records, wal_fpi, wal_buffers_full, stats_reset from pg_stat_wal` },
@@ -246,7 +246,7 @@ export const DEFS: Def[] = [
   { id: "v_running", section: "vacuum", title: "Vacuums running now", source: "pg_stat_progress_vacuum", limit: 20,
     description: "Live vacuum progress.",
     columns: [C("pid", "PID", "id"), C("table", "Table", "mono"), C("phase", "Phase"), C("progress_pct", "Progress", "pct"), C("dead_tuples", "Dead tuples collected", "int")],
-    sql: () => `select pid, relid::regclass::text as "table", phase, round(100.0 * heap_blks_scanned / nullif(heap_blks_total, 0), 1) as progress_pct, num_dead_item_ids as dead_tuples
+    sql: (c) => `select pid, relid::regclass::text as "table", phase, round(100.0 * heap_blks_scanned / nullif(heap_blks_total, 0), 1) as progress_pct, ${c.version >= 170000 ? "num_dead_item_ids" : "num_dead_tuples"} as dead_tuples
       from pg_stat_progress_vacuum where datid = ${inDb} limit 20` },
   { id: "v_settings", section: "vacuum", title: "Autovacuum settings", source: "pg_settings", limit: 20,
     description: "Thresholds that decide when autovacuum runs and how hard it works.", columns: SETTING_COLS,
@@ -265,8 +265,8 @@ export const DEFS: Def[] = [
   { id: "l_db", section: "logs", title: "Database-reported errors and activity", source: "pg_stat_database", layout: "kv", limit: 1,
     description: "Counters the database keeps since the last stats reset.",
     columns: [C("commits", "Commits", "int"), C("rollbacks", "Rollbacks", "int"), C("rollback_pct", "Rollback rate", "pct", { warn: 5, bad: 20 }), C("deadlocks", "Deadlocks", "int", { warn: 1, bad: 10 }), C("conflicts", "Recovery conflicts", "int"), C("temp_files", "Temp files", "int"), C("temp_bytes", "Temp bytes", "bytes"), C("checksum_failures", "Checksum failures", "int", { bad: 1 }), C("stats_reset", "Since", "ts"), C("next_xid", "Transaction counter", "int")],
-    sql: () => `select xact_commit as commits, xact_rollback as rollbacks, round(100.0 * xact_rollback / nullif(xact_commit + xact_rollback, 0), 2) as rollback_pct, deadlocks, conflicts, temp_files, temp_bytes,
-      coalesce(checksum_failures, 0) as checksum_failures, stats_reset, pg_snapshot_xmax(pg_current_snapshot())::text::bigint as next_xid
+    sql: (c) => `select xact_commit as commits, xact_rollback as rollbacks, round(100.0 * xact_rollback / nullif(xact_commit + xact_rollback, 0), 2) as rollback_pct, deadlocks, conflicts, temp_files, temp_bytes,
+      coalesce(checksum_failures, 0) as checksum_failures, stats_reset, ${c.version >= 130000 ? "pg_snapshot_xmax(pg_current_snapshot())::text::bigint" : "txid_snapshot_xmax(txid_current_snapshot())::bigint"} as next_xid
       from pg_stat_database where datname = current_database()` },
   { id: "l_settings", section: "logs", title: "Logging configuration", source: "pg_settings", limit: 20,
     description: "What the server writes to its logs. Without slow-query and lock-wait logging, incidents leave little evidence.", columns: SETTING_COLS,
