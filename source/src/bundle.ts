@@ -39,7 +39,7 @@ export interface Bundle {
   provider: ProviderId;
   /** The hosting platform recognised from the host name (Railway, Amazon RDS, ...), not the host name itself. */
   hosting: string | null;
-  connection: { tls: boolean; local: boolean };
+  connection: { tls: boolean; local: boolean; /** The server certificate was verified against a trusted CA. Older bundles lack it. */ verified?: boolean };
   session: RoleInfo & { tls: boolean; readOnly: true };
   /** One-way fingerprint of host, port and database name, so a later scan of the same database can be compared. */
   target?: string;
@@ -115,7 +115,7 @@ export function parseBundle(input: unknown): Bundle {
     collector: typeof b.collector === "string" ? b.collector.slice(0, 32) : "unknown",
     server: { versionNum: int(server.versionNum, "server.versionNum"), version: str(server.version, 300, "server.version") },
     provider, hosting,
-    connection: { tls: bool(connection.tls, "connection.tls"), local: bool(connection.local, "connection.local") },
+    connection: { tls: bool(connection.tls, "connection.tls"), local: bool(connection.local, "connection.local"), ...(typeof connection.verified === "boolean" ? { verified: connection.verified } : {}) },
     session: {
       role: str(s.role, 128, "session.role"), superuser: bool(s.superuser, "session.superuser"), monitor: bool(s.monitor, "session.monitor"),
       bypassrls: Boolean(s.bypassrls), replication: Boolean(s.replication), createrole: Boolean(s.createrole), createdb: Boolean(s.createdb),

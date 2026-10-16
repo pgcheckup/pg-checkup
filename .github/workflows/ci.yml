@@ -1,0 +1,99 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checkup:
+    name: PostgreSQL ${{ matrix.pg }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [12, 13, 14, 15, 16, 17]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install --no-audit --no-fund
+
+      - name: Start PostgreSQL ${{ matrix.pg }} with pg_stat_statements, a statistics-only login and a table with problems
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=admin -p 5432:5432 postgres:${{ matrix.pg }} -c shared_preload_libraries=pg_stat_statements
+          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+          docker exec pg psql -U postgres -v ON_ERROR_STOP=1 \
+            -c "create extension pg_stat_statements" \
+            -c "create role checkup_reader login password 'reader'; grant pg_monitor to checkup_reader" \
+            -c "create table orders(id serial primary key, amount int, note text)" \
+            -c "insert into orders(amount, note) select g, repeat('x', 40) from generate_series(1, 20000) g" \
+            -c "delete from orders where id % 3 = 0" \
+            -c "create index orders_amount on orders(amount); create index orders_amount_copy on orders(amount)" \
+            -c "select count(*) from orders where amount > 100"
+
+      - name: Help, version, queries
+        run: |
+          node dist/pg-checkup.js --version
+          node dist/pg-checkup.js --help | grep -q "Usage: pg-checkup"
+          node dist/pg-checkup.js scan --help | grep -q -- "--include-query-text"
+          node dist/pg-checkup.js sql | grep -q "pg_stat_activity"
+          node dist/pg-checkup.js sql | grep -q "set default_transaction_read_only = on"
+
+      - name: Checkup with the statistics-only login
+        env: { PGPASSWORD: reader }
+        run: |
+          node dist/pg-checkup.js doctor -h 127.0.0.1 -U checkup_reader -d postgres --no-color
+          node dist/pg-checkup.js -h 127.0.0.1 -U checkup_reader -d postgres --no-pace --no-color -o reader.json | tee out.txt
+          grep -q "checks passed" out.txt
+          node -e "
+            const b = JSON.parse(require('fs').readFileSync('reader.json'));
+            const d = (id) => b.datasets.find((x) => x.id === id);
+            for (const id of ['q_total', 'q_mean', 'q_calls', 'q_io', 'q_temp', 'i_dup', 'v_dead', 'c_limits', 'b_idle']) { const x = d(id); if (!x || x.error) throw new Error(id + ': ' + (x ? x.error : 'not collected')); }
+            if (!d('q_total').rows.length) throw new Error('no pg_stat_statements rows: the timing columns did not match this version');
+            if (d('i_dup').rows.length !== 1) throw new Error('the duplicate index was not found');
+            if (b.session.role !== 'checkup_reader' || b.session.superuser) throw new Error('wrong session');
+            console.log('datasets ok on', b.server.version.split(',')[0]);
+          "
+          node dist/pg-checkup.js show reader.json --md --no-color | head -1 | grep -q "^# Postgres health report"
+          node dist/pg-checkup.js show reader.json --json | node -e "const r = JSON.parse(require('fs').readFileSync(0)); if (!Array.isArray(r.findings) || r.checks.length < 80) throw new Error('no analysis'); console.log(r.findings.length, 'findings,', r.checks.length, 'checks')"
+
+      - name: Every diagnostic view readable as the server's own superuser (--strict)
+        env: { PGPASSWORD: admin }
+        run: node dist/pg-checkup.js -h 127.0.0.1 -U postgres -d postgres --strict --no-pace --no-color -o su.json > /dev/null
+
+      - name: A privileged login on a remote host is refused (0.0.0.0 reaches the same server but is not localhost)
+        env: { PGPASSWORD: admin }
+        run: |
+          set +e
+          node dist/pg-checkup.js -h 0.0.0.0 -U postgres -d postgres --no-pace --no-color -o refused.json
+          code=$?
+          set -e
+          test "$code" -eq 3
+          test ! -f refused.json
+
+      - name: Exit codes for CI
+        env: { PGPASSWORD: reader }
+        run: |
+          set +e
+          node dist/pg-checkup.js show reader.json --fail-on info --no-pace > /dev/null; test $? -eq 1
+          node dist/pg-checkup.js --bogus; test $? -eq 2
+          node dist/pg-checkup.js show nope.json; test $? -eq 2
+          set -e
+
+      - name: Password never in the saved file or the output
+        env: { PGPASSWORD: reader }
+        run: |
+          ! grep -q "reader" reader.json
+          node dist/pg-checkup.js postgres://checkup_reader:reader@127.0.0.1:5432/postgres --no-pace --no-color -o url.json 2>&1 | grep -q "checkup_reader:\*\*\*@"
+
+      - run: npm pack --dry-run
+
+  node18:
+    name: Node 18
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 18 }
+      - run: npm install --no-audit --no-fund
+      - run: node dist/pg-checkup.js --help | grep -q "Usage: pg-checkup" && node dist/pg-checkup.js sql | grep -q pg_stat_activity

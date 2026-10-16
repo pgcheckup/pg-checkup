@@ -82,6 +82,7 @@ export function buildProgram(version: string, record: (p: Parsed) => void, quiet
     .option('--no-color', 'plain text (NO_COLOR=1 does the same)')
     .option('--no-input', 'never prompt; for scripts and CI')
     .option('--no-pace', 'print all findings at once instead of one at a time')
+    .option('--strict', 'exit 1 when any diagnostic view could not be read (for CI)')
     .addHelpText('after', AFTER)
     .showHelpAfterError('(run pg-checkup --help)')
     .exitOverride();

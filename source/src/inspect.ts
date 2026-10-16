@@ -5,38 +5,41 @@ import { MORE } from "./inspect_more.js";
 import { CAP } from "./inspect_cap.js";
 import { OPS } from "./inspect_ops.js";
 
+/** pg_stat_statements timing columns: total_exec_time and friends from PostgreSQL 13; total_time and friends before. */
+const ex = (c: { version: number }) => (c.version >= 130000 ? "_exec_time" : "_time");
+
 export const DEFS: Def[] = [
   // ───────── Queries
   { id: "q_total", section: "queries", title: "Heaviest queries by total time", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 25,
     description: "Statements that consumed the most cumulative execution time. Optimizing the top few has the biggest payoff. Catalog-reading statements (dashboards, ORMs introspecting the schema, monitoring agents) and provider-internal roles are left out so this shows the application's own load.",
     columns: [C("total_ms", "Total", "ms"), C("pct", "% of load", "pct", { warn: 20, bad: 40 }), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("rows", "Rows", "int"), C("role", "Role"), C("query", "Query", "mono")],
-    sql: (c) => `select round(s.total_exec_time)::bigint as total_ms, round((100 * s.total_exec_time / nullif(sum(s.total_exec_time) over (), 0))::numeric, 1) as pct,
-      md5(s.query) as fingerprint, s.calls, round(s.mean_exec_time::numeric, 2) as mean_ms, s.rows, r.rolname::text as role, ${maskSql("s.query", 600)} as query,
-      round(sum(s.total_exec_time) over ())::bigint as workload_ms
-      ${pgss(c)} order by s.total_exec_time desc limit 25` },
+    sql: (c) => `select round(s.total${ex(c)})::bigint as total_ms, round((100 * s.total${ex(c)} / nullif(sum(s.total${ex(c)}) over (), 0))::numeric, 1) as pct,
+      md5(s.query) as fingerprint, s.calls, round(s.mean${ex(c)}::numeric, 2) as mean_ms, s.rows, r.rolname::text as role, ${maskSql("s.query", 600)} as query,
+      round(sum(s.total${ex(c)}) over ())::bigint as workload_ms
+      ${pgss(c)} order by s.total${ex(c)} desc limit 25` },
   { id: "q_mean", section: "queries", title: "Slowest queries per call", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 25,
     description: "Highest average latency (called at least 5 times). These are the ones users feel.",
     columns: [C("mean_ms", "Mean", "ms", { warn: 500, bad: 2000 }), C("max_ms", "Max", "ms"), C("stddev_ms", "Std dev", "ms"), C("calls", "Calls", "int"), C("total_ms", "Total", "ms"), C("query", "Query", "mono")],
-    sql: (c) => `select round(s.mean_exec_time::numeric, 1) as mean_ms, round(s.max_exec_time::numeric, 1) as max_ms, round(s.stddev_exec_time::numeric, 1) as stddev_ms,
-      s.calls, round(s.total_exec_time)::bigint as total_ms, ${maskSql("s.query", 600)} as query
-      ${pgss(c)} and s.calls >= 5 order by s.mean_exec_time desc limit 25` },
+    sql: (c) => `select round(s.mean${ex(c)}::numeric, 1) as mean_ms, round(s.max${ex(c)}::numeric, 1) as max_ms, round(s.stddev${ex(c)}::numeric, 1) as stddev_ms,
+      s.calls, round(s.total${ex(c)})::bigint as total_ms, ${maskSql("s.query", 600)} as query
+      ${pgss(c)} and s.calls >= 5 order by s.mean${ex(c)} desc limit 25` },
   { id: "q_io", section: "queries", title: "Most disk-read queries", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 20,
     description: "Statements reading the most blocks from disk instead of cache.",
     columns: [C("disk_bytes", "Read from disk", "bytes"), C("hit_pct", "Cache hit", "pct"), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("query", "Query", "mono")],
     sql: (c) => `select s.shared_blks_read * 8192 as disk_bytes, round((100.0 * s.shared_blks_hit / nullif(s.shared_blks_hit + s.shared_blks_read, 0))::numeric, 1) as hit_pct,
-      s.calls, round(s.mean_exec_time::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
+      s.calls, round(s.mean${ex(c)}::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
       ${pgss(c)} and s.shared_blks_read > 0 order by s.shared_blks_read desc limit 20` },
   { id: "q_calls", section: "queries", title: "Most frequent queries", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 20,
     description: "Very high call counts with tiny latency often point at N+1 patterns or missing caching.",
     columns: [C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("total_ms", "Total", "ms"), C("rows_per_call", "Rows/call", "int"), C("query", "Query", "mono")],
-    sql: (c) => `select s.calls, round(s.mean_exec_time::numeric, 3) as mean_ms, round(s.total_exec_time)::bigint as total_ms, (s.rows / nullif(s.calls, 0))::bigint as rows_per_call, ${maskSql("s.query", 600)} as query
+    sql: (c) => `select s.calls, round(s.mean${ex(c)}::numeric, 3) as mean_ms, round(s.total${ex(c)})::bigint as total_ms, (s.rows / nullif(s.calls, 0))::bigint as rows_per_call, ${maskSql("s.query", 600)} as query
       ${pgss(c)} order by s.calls desc limit 20` },
   { id: "q_temp", section: "queries", title: "Queries spilling to temp files", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 15,
     description: "Sorts and hashes that exceed work_mem and write to disk.",
     columns: [C("temp_bytes", "Temp written", "bytes"), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("query", "Query", "mono")],
-    sql: (c) => `select s.temp_blks_written * 8192 as temp_bytes, s.calls, round(s.mean_exec_time::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
+    sql: (c) => `select s.temp_blks_written * 8192 as temp_bytes, s.calls, round(s.mean${ex(c)}::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
       ${pgss(c)} and s.temp_blks_written > 0 order by s.temp_blks_written desc limit 15` },
-  { id: "q_wal", section: "queries", title: "Queries generating the most WAL", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 15,
+  { id: "q_wal", section: "queries", title: "Queries generating the most WAL", source: "pg_stat_statements", ext: "pg_stat_statements", limit: 15, minPg: 130000,
     description: "Heavy WAL writers drive replication lag, archive backlog and disk growth.",
     columns: [C("wal_bytes", "WAL written", "bytes"), C("wal_fpi", "Full-page images", "int"), C("calls", "Calls", "int"), C("query", "Query", "mono")],
     sql: (c) => `select s.wal_bytes::bigint as wal_bytes, s.wal_fpi, s.calls, ${maskSql("s.query", 600)} as query
@@ -90,12 +93,12 @@ export const DEFS: Def[] = [
       from pg_stat_user_indexes s join pg_index i on i.indexrelid = s.indexrelid join pg_stat_user_tables t on t.relid = s.relid
       where s.idx_scan = 0 and not i.indisunique and not i.indisprimary and ${us(c, "s.schemaname")} order by bytes desc limit 30` },
   { id: "i_dup", section: "indexes", title: "Duplicate indexes", source: "pg_index", limit: 25,
-    description: "Two or more indexes on the same table with identical columns, operator classes, predicate and expressions. All but one can usually be dropped.",
+    description: "Two or more indexes on the same table that are interchangeable: same columns, key and included columns, operator classes, collations, sort options, predicate, expressions, access method and uniqueness. All but one can usually be dropped.",
     columns: [C("table", "Table", "mono"), C("indexes", "Indexes", "mono"), C("copies", "Copies", "int"), C("bytes", "Total size", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", array_to_string(array_agg(ic.relname order by ic.relname), ', ') as indexes, count(*)::int as copies, sum(pg_relation_size(i.indexrelid))::bigint as bytes
       from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_class t on t.oid = i.indrelid join pg_namespace n on n.oid = t.relnamespace
       where ${us(c, "n.nspname")} and i.indisvalid
-      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indclass::text, i.indoption::text, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
+      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
       having count(*) > 1 order by bytes desc limit 25` },
   { id: "i_fk", section: "indexes", title: "Foreign keys without a supporting index", source: "pg_constraint, pg_index", limit: 30,
     description: "Deleting or updating a referenced row must scan the referencing table. Without an index on the foreign-key columns that is a full scan (and can take long locks).",

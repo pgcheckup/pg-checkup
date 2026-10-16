@@ -43,7 +43,7 @@ metadata, no SQL text, no table data. Object and role names are in it; read it b
   shareable report, fix SQL:   pg-checkup upload pg-checkup-app-2026-10-07T15-29-33-a1b2.json
 ```
 
-Install nothing (`npx pg-checkup ...`) or keep it around (`npm install -g pg-checkup`, then `pg-checkup ...`). In a project with `DATABASE_URL` in `.env` or `.env.local`, `npx pg-checkup` alone is enough; it says which file it used. Needs Node 18 or newer and PostgreSQL 12 or newer. Works without `pg_stat_statements`; the query checks are skipped and say so. `-v` lists every check, `--md` writes the report as Markdown, `--json` writes the statistics and findings as JSON, and `--fail-on warning` makes a build fail.
+Install nothing (`npx pg-checkup ...`) or keep it around (`npm install -g pg-checkup`, then `pg-checkup ...`). In a project with `DATABASE_URL` in `.env` or `.env.local`, `npx pg-checkup` alone is enough; it says which file it used. Needs Node 18 or newer and PostgreSQL 12 or newer; CI runs the checkup against PostgreSQL 12 to 17 on every push. Works without `pg_stat_statements`; the query checks are skipped and say so. `-v` lists every check, `--md` writes the report as Markdown, `--json` writes the statistics and findings as JSON, and `--fail-on warning` makes a build fail.
 ## Connecting
 
 The same ways as `psql`: a `postgres://` URL, `-h HOST -p PORT -U USER -d DBNAME`, `--service NAME`, or the `PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGSERVICE` and `PGSSLMODE` variables. The password is taken from the URL, `PGPASSWORD`, the service file, `~/.pgpass`, or a hidden prompt, in that order. `-W` always prompts, `-w` never does. Nothing about the connection is saved.
@@ -55,6 +55,10 @@ pg-checkup --json > checkup.json      # JSON on stdout, messages on stderr
 ```
 
 `pg-checkup doctor` connects, prints the server version, what the login can do and which extensions are present, and stops. Run it first when something is unclear.
+
+### TLS
+
+For a remote host the connection uses TLS and verifies the server's certificate against the system's trusted CAs, plus `PGSSLROOTCERT` if set. When the certificate cannot be verified, which is the case for providers that sign with their own CA, the connection is still encrypted but the output says "certificate not verified" and how to require it: `sslmode=verify-full` in the URL and `PGSSLROOTCERT=path` to the provider's CA file. With `sslmode=verify-full` or `verify-ca` there is no fallback. Plaintext is used only when the server refuses TLS, and is reported.
 
 ### The login it expects
 
@@ -99,12 +103,12 @@ pg-checkup compare before-window.json after-window.json
 | Code | Meaning |
 |---|---|
 | 0 | Completed. A completed scan can still have flagged checks; read the output. |
-| 1 | `verify` or `compare` found a regression. |
+| 1 | `verify` or `compare` found a regression, `--fail-on` matched, or `--strict` found an unreadable view. |
 | 2 | Usage or runtime error. |
 | 3 | The login has more access than a checkup needs. |
 | 4 | `compare` was inconclusive. |
 | 130 | Cancelled with Ctrl+C. |
 
-`--json` prints only JSON on stdout. `NO_COLOR=1`, `--no-color`, `TERM=dumb` or a non-terminal stdout turn colour off. `--no-input` disables every prompt.
+`--json` prints only JSON on stdout. `NO_COLOR=1`, `--no-color`, `TERM=dumb` or a non-terminal stdout turn colour off. `--no-input` disables every prompt. `--strict` exits 1 when a diagnostic view could not be read, so a CI job notices a permission problem instead of a quieter report; a missing extension is a skip, not an error.
 
 The collector (everything under `source/`) is MIT licensed. The checks and triage are free to use as part of this package; see LICENSE. The hosted report is a separate service.

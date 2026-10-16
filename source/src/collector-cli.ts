@@ -191,6 +191,15 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
 }
 /** Whether any finding is at or above the --fail-on severity. */
 const fails = (findings: Finding[]) => { const at = opt('fail-on'); return at ? findings.some((f) => SEV_RANK.indexOf(f.severity) <= SEV_RANK.indexOf(at as Severity)) : false; };
+/** --strict: a diagnostic view that could not be read (an error, not a missing extension) is a failure, not a skip. */
+function strictFails(b: Bundle): boolean {
+  if (!flag('strict')) return false;
+  const broken = b.datasets.filter((d) => d.error);
+  if (!broken.length) return false;
+  say(`--strict: ${broken.length} diagnostic ${broken.length === 1 ? 'view' : 'views'} could not be read:`);
+  for (const d of broken) say(`  - ${d.title ?? d.id}: ${firstSentence(d.error!)}`);
+  return true;
+}
 const markdown = (r: RunResult, b: Bundle) => toMarkdown(r.findings, r.datasets, { version: r.serverVersion, provider: r.provider, scannedAt: b.collectedAt, checks: r.checks });
 const withAnalysis = (b: Bundle, r: RunResult) => ({ ...b, findings: r.findings, checks: r.checks, skipped: r.skipped });
 const firstSentence = (s: string) => (s.match(/^[^.:]*[.:]?/)?.[0] ?? s).replace(/[.:]$/, '').trim();
@@ -247,7 +256,7 @@ async function scan() {
   const c = await connection();
   const local = isLocalHost(c.url);
   const t0 = Date.now();
-  let tls = false;
+  let tls = false, verified = false;
   const b = await collect(c.url, {
     provider, queryText: flag('include-query-text') ? 'masked' : 'removed',
     checkRole: (r) => {
@@ -256,16 +265,17 @@ async function scan() {
       if (roleProblems(r).length) say(`${r.role} can read tables. Accepted because the database is on this machine; a remote database needs a statistics-only login (pg-checkup role).`);
     },
     progress: (e) => {
-      if (e.step === 'connected') { tls = e.tls; return; }
+      if (e.step === 'connected') { tls = e.tls; verified = e.verified; return; }
       if (process.stderr.isTTY && !flag('json')) process.stderr.write(`\rReading statistics views ${e.done}/${e.total}…\x1b[K`);
     },
   });
   if (process.stderr.isTTY && !flag('json')) process.stderr.write('\r\x1b[K');
-  say(`Connected ${tls ? 'with' : 'without'} TLS${allowPrivilegedRole ? ', privileged-role check skipped' : ''}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  say(`Connected ${tls ? (verified ? 'with TLS, certificate verified' : 'with TLS, certificate not verified') : 'without TLS'}${allowPrivilegedRole ? ', privileged-role check skipped' : ''}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+  if (tls && !verified && !local) say(`The server's certificate is not signed by a CA this machine trusts. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
   if (flag('include-query-text')) say('SQL text is kept with literals masked. Comments and identifiers can still be sensitive; read the file before sharing.');
   const saved = save(b, `pg-checkup-${safeName(c.database)}`, c.password);
   const r = await analyze(b, { provider });
-  const code = fails(r.findings) ? 1 : 0;
+  const code = fails(r.findings) || strictFails(b) ? 1 : 0;
   if (flag('json')) { say(`Saved ${saved.file}`); process.stdout.write(json(withAnalysis(b, r))); return code; }
   if (flag('md')) { say(`Saved ${saved.file}`); process.stdout.write(markdown(r, b)); return code; }
   out();
@@ -284,10 +294,11 @@ async function main(): Promise<number> {
   if (cmd === 'doctor') {
     out(`pg-checkup ${COLLECTOR_VERSION}, Node ${process.version} on ${process.platform}`);
     const c = await connection();
-    const { db, tls, local } = await openReadOnlySession(c.url);
+    const { db, tls, verified, local } = await openReadOnlySession(c.url);
     try {
       const [{ v, s }] = (await db.query(`select current_setting('server_version_num')::int as v, version() as s`)).rows;
-      out(`${ink(32, '✓')} Connected: ${String(s).split(' on ')[0].split(',')[0]} (${v}), ${tls ? 'TLS' : 'no TLS'}, read-only session${local ? ', local' : ''}`);
+      out(`${tls && !verified && !local ? ink(33, '!') : ink(32, '✓')} Connected: ${String(s).split(' on ')[0].split(',')[0]} (${v}), ${tls ? (verified ? 'TLS, certificate verified' : 'TLS, certificate not verified') : 'no TLS'}, read-only session${local ? ', local' : ''}`);
+      if (tls && !verified && !local) out(`    To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
       const role = roleInfo((await db.query(roleSql(profileFor(provider ?? providerIdFromUrl(c.url))))).rows[0] ?? {});
       const problems = roleProblems(role);
       out(`${problems.length ? (local ? ink(33, '!') : ink(31, '✗')) : ink(32, '✓')} Login ${role.role}: ${role.monitor ? 'in pg_monitor' : 'not in pg_monitor (other sessions may be hidden)'}${problems.length ? '' : ', statistics only'}`);
@@ -303,7 +314,7 @@ async function main(): Promise<number> {
     const { text, value } = load(positionals[0]); const b = parseBundle(value);
     if (cmd === 'show') {
       const r = await analyze(b, { provider });
-      const code = fails(r.findings) ? 1 : 0;
+      const code = fails(r.findings) || strictFails(b) ? 1 : 0;
       if (flag('json')) { process.stdout.write(json(withAnalysis(b, r))); return code; }
       if (flag('md')) { process.stdout.write(markdown(r, b)); return code; }
       out(dim(`${positionals[0]}, collected ${b.collectedAt.replace('T', ' ').slice(0, 16)} UTC`));

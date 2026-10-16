@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/collector-cli.ts
-import { readFileSync as readFileSync2, writeFileSync, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, statSync as statSync2 } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { spawnSync } from "node:child_process";
 import { createHash as createHash2, randomBytes } from "node:crypto";
@@ -181,6 +181,7 @@ function redactUrl(url) {
 
 // src/collect.ts
 import net from "node:net";
+import { readFileSync as readFileSync2 } from "node:fs";
 import pg from "pg";
 
 // src/provider.ts
@@ -824,6 +825,7 @@ var OPS = [
 ];
 
 // src/inspect.ts
+var ex = (c) => c.version >= 13e4 ? "_exec_time" : "_time";
 var DEFS = [
   // ───────── Queries
   {
@@ -835,10 +837,10 @@ var DEFS = [
     limit: 25,
     description: "Statements that consumed the most cumulative execution time. Optimizing the top few has the biggest payoff. Catalog-reading statements (dashboards, ORMs introspecting the schema, monitoring agents) and provider-internal roles are left out so this shows the application's own load.",
     columns: [C("total_ms", "Total", "ms"), C("pct", "% of load", "pct", { warn: 20, bad: 40 }), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("rows", "Rows", "int"), C("role", "Role"), C("query", "Query", "mono")],
-    sql: (c) => `select round(s.total_exec_time)::bigint as total_ms, round((100 * s.total_exec_time / nullif(sum(s.total_exec_time) over (), 0))::numeric, 1) as pct,
-      md5(s.query) as fingerprint, s.calls, round(s.mean_exec_time::numeric, 2) as mean_ms, s.rows, r.rolname::text as role, ${maskSql("s.query", 600)} as query,
-      round(sum(s.total_exec_time) over ())::bigint as workload_ms
-      ${pgss(c)} order by s.total_exec_time desc limit 25`
+    sql: (c) => `select round(s.total${ex(c)})::bigint as total_ms, round((100 * s.total${ex(c)} / nullif(sum(s.total${ex(c)}) over (), 0))::numeric, 1) as pct,
+      md5(s.query) as fingerprint, s.calls, round(s.mean${ex(c)}::numeric, 2) as mean_ms, s.rows, r.rolname::text as role, ${maskSql("s.query", 600)} as query,
+      round(sum(s.total${ex(c)}) over ())::bigint as workload_ms
+      ${pgss(c)} order by s.total${ex(c)} desc limit 25`
   },
   {
     id: "q_mean",
@@ -849,9 +851,9 @@ var DEFS = [
     limit: 25,
     description: "Highest average latency (called at least 5 times). These are the ones users feel.",
     columns: [C("mean_ms", "Mean", "ms", { warn: 500, bad: 2e3 }), C("max_ms", "Max", "ms"), C("stddev_ms", "Std dev", "ms"), C("calls", "Calls", "int"), C("total_ms", "Total", "ms"), C("query", "Query", "mono")],
-    sql: (c) => `select round(s.mean_exec_time::numeric, 1) as mean_ms, round(s.max_exec_time::numeric, 1) as max_ms, round(s.stddev_exec_time::numeric, 1) as stddev_ms,
-      s.calls, round(s.total_exec_time)::bigint as total_ms, ${maskSql("s.query", 600)} as query
-      ${pgss(c)} and s.calls >= 5 order by s.mean_exec_time desc limit 25`
+    sql: (c) => `select round(s.mean${ex(c)}::numeric, 1) as mean_ms, round(s.max${ex(c)}::numeric, 1) as max_ms, round(s.stddev${ex(c)}::numeric, 1) as stddev_ms,
+      s.calls, round(s.total${ex(c)})::bigint as total_ms, ${maskSql("s.query", 600)} as query
+      ${pgss(c)} and s.calls >= 5 order by s.mean${ex(c)} desc limit 25`
   },
   {
     id: "q_io",
@@ -863,7 +865,7 @@ var DEFS = [
     description: "Statements reading the most blocks from disk instead of cache.",
     columns: [C("disk_bytes", "Read from disk", "bytes"), C("hit_pct", "Cache hit", "pct"), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("query", "Query", "mono")],
     sql: (c) => `select s.shared_blks_read * 8192 as disk_bytes, round((100.0 * s.shared_blks_hit / nullif(s.shared_blks_hit + s.shared_blks_read, 0))::numeric, 1) as hit_pct,
-      s.calls, round(s.mean_exec_time::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
+      s.calls, round(s.mean${ex(c)}::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
       ${pgss(c)} and s.shared_blks_read > 0 order by s.shared_blks_read desc limit 20`
   },
   {
@@ -875,7 +877,7 @@ var DEFS = [
     limit: 20,
     description: "Very high call counts with tiny latency often point at N+1 patterns or missing caching.",
     columns: [C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("total_ms", "Total", "ms"), C("rows_per_call", "Rows/call", "int"), C("query", "Query", "mono")],
-    sql: (c) => `select s.calls, round(s.mean_exec_time::numeric, 3) as mean_ms, round(s.total_exec_time)::bigint as total_ms, (s.rows / nullif(s.calls, 0))::bigint as rows_per_call, ${maskSql("s.query", 600)} as query
+    sql: (c) => `select s.calls, round(s.mean${ex(c)}::numeric, 3) as mean_ms, round(s.total${ex(c)})::bigint as total_ms, (s.rows / nullif(s.calls, 0))::bigint as rows_per_call, ${maskSql("s.query", 600)} as query
       ${pgss(c)} order by s.calls desc limit 20`
   },
   {
@@ -887,7 +889,7 @@ var DEFS = [
     limit: 15,
     description: "Sorts and hashes that exceed work_mem and write to disk.",
     columns: [C("temp_bytes", "Temp written", "bytes"), C("calls", "Calls", "int"), C("mean_ms", "Mean", "ms"), C("query", "Query", "mono")],
-    sql: (c) => `select s.temp_blks_written * 8192 as temp_bytes, s.calls, round(s.mean_exec_time::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
+    sql: (c) => `select s.temp_blks_written * 8192 as temp_bytes, s.calls, round(s.mean${ex(c)}::numeric, 1) as mean_ms, ${maskSql("s.query", 600)} as query
       ${pgss(c)} and s.temp_blks_written > 0 order by s.temp_blks_written desc limit 15`
   },
   {
@@ -897,6 +899,7 @@ var DEFS = [
     source: "pg_stat_statements",
     ext: "pg_stat_statements",
     limit: 15,
+    minPg: 13e4,
     description: "Heavy WAL writers drive replication lag, archive backlog and disk growth.",
     columns: [C("wal_bytes", "WAL written", "bytes"), C("wal_fpi", "Full-page images", "int"), C("calls", "Calls", "int"), C("query", "Query", "mono")],
     sql: (c) => `select s.wal_bytes::bigint as wal_bytes, s.wal_fpi, s.calls, ${maskSql("s.query", 600)} as query
@@ -996,12 +999,12 @@ var DEFS = [
     title: "Duplicate indexes",
     source: "pg_index",
     limit: 25,
-    description: "Two or more indexes on the same table with identical columns, operator classes, predicate and expressions. All but one can usually be dropped.",
+    description: "Two or more indexes on the same table that are interchangeable: same columns, key and included columns, operator classes, collations, sort options, predicate, expressions, access method and uniqueness. All but one can usually be dropped.",
     columns: [C("table", "Table", "mono"), C("indexes", "Indexes", "mono"), C("copies", "Copies", "int"), C("bytes", "Total size", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", array_to_string(array_agg(ic.relname order by ic.relname), ', ') as indexes, count(*)::int as copies, sum(pg_relation_size(i.indexrelid))::bigint as bytes
       from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_class t on t.oid = i.indrelid join pg_namespace n on n.oid = t.relnamespace
       where ${us(c, "n.nspname")} and i.indisvalid
-      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indclass::text, i.indoption::text, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
+      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
       having count(*) > 1 order by bytes desc limit 25`
   },
   {
@@ -1545,7 +1548,7 @@ function parseBundle(input) {
     server: { versionNum: int(server.versionNum, "server.versionNum"), version: str(server.version, 300, "server.version") },
     provider: provider3,
     hosting,
-    connection: { tls: bool(connection3.tls, "connection.tls"), local: bool(connection3.local, "connection.local") },
+    connection: { tls: bool(connection3.tls, "connection.tls"), local: bool(connection3.local, "connection.local"), ...typeof connection3.verified === "boolean" ? { verified: connection3.verified } : {} },
     session: {
       role: str(s.role, 128, "session.role"),
       superuser: bool(s.superuser, "session.superuser"),
@@ -1656,6 +1659,7 @@ var pinned = (address) => () => {
   return s;
 };
 var base = (connectionString, address) => ({ connectionString, statement_timeout: 15e3, connectionTimeoutMillis: 1e4, application_name: "pg-checkup", ...address ? { stream: pinned(address) } : {} });
+var CERT_ERRORS = /SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER|DEPTH_ZERO|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|certificate/i;
 async function connect(url, local, address) {
   const u = new URL(url);
   const explicit = u.searchParams.has("sslmode") || u.searchParams.has("ssl");
@@ -1664,29 +1668,44 @@ async function connect(url, local, address) {
     db.on("error", () => {
     });
     await db.connect();
-    const tls = explicit ? !/^(disable|allow)$/.test(u.searchParams.get("sslmode") ?? "") : false;
-    return { db, tls };
+    const mode = u.searchParams.get("sslmode") ?? "";
+    const tls = explicit ? !/^(disable|allow)$/.test(mode) : false;
+    return { db, tls, verified: tls && /^verify-(ca|full)$/.test(mode) };
   }
-  const secure = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: false } });
-  secure.on("error", () => {
+  let ca;
+  if (process.env.PGSSLROOTCERT) {
+    try {
+      ca = readFileSync2(process.env.PGSSLROOTCERT, "utf8");
+    } catch {
+    }
+  }
+  const verified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: true, ...ca ? { ca } : {} } });
+  verified.on("error", () => {
   });
   try {
-    await secure.connect();
-    return { db: secure, tls: true };
+    await verified.connect();
+    return { db: verified, tls: true, verified: true };
   } catch (e) {
-    if (!/does not support SSL/i.test(String(e.message))) throw e;
-    const plain = new pg.Client(base(url, address));
-    plain.on("error", () => {
+    if (/does not support SSL/i.test(String(e.message))) {
+      const plain = new pg.Client(base(url, address));
+      plain.on("error", () => {
+      });
+      await plain.connect();
+      return { db: plain, tls: false, verified: false };
+    }
+    if (!CERT_ERRORS.test(`${e.code ?? ""} ${e.message ?? ""}`)) throw e;
+    const unverified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: false } });
+    unverified.on("error", () => {
     });
-    await plain.connect();
-    return { db: plain, tls: false };
+    await unverified.connect();
+    return { db: unverified, tls: true, verified: false };
   }
 }
 async function openReadOnlySession(connectionString, address) {
   const local = LOCAL.has(new URL(connectionString).hostname);
-  const { db, tls } = await connect(connectionString, local, address);
+  const { db, tls, verified } = await connect(connectionString, local, address);
   await db.query(`${TAG} set default_transaction_read_only = on`);
-  return { db, tls, local };
+  return { db, tls, verified, local };
 }
 var VERSION_SQL = `select current_setting('server_version_num')::int as v, version() as s, pg_backend_pid() as pid`;
 var PUBLIC_CREATE_SQL = `select has_schema_privilege('public', 'public', 'CREATE') as open`;
@@ -1708,13 +1727,13 @@ var SQL_TEXT_DATASETS = /^(q_|b_)/;
 var NO_TEXT = "(query text not collected)";
 var withoutText = (r) => Object.fromEntries(Object.entries(r).map(([k, x]) => [k, TEXT_COLUMNS.has(k) || k === "detail" && r.holder === "Backend session" ? NO_TEXT : x]));
 async function collect(connectionString, opts = {}) {
-  const { db, tls, local } = await openReadOnlySession(connectionString, opts.connectAddress);
+  const { db, tls, verified, local } = await openReadOnlySession(connectionString, opts.connectAddress);
   try {
     const [{ v, s, pid }] = (await db.query(`${TAG} ${VERSION_SQL}`)).rows;
     const providerId = opts.provider ?? providerIdFromUrl(connectionString);
     const profile = profileFor(providerId);
     const ctx = { db, version: v, opts, profile, selfPid: pid, tls, local, facts: {}, q: async (sql, params) => (await db.query(`${TAG} ${sql}`, params)).rows };
-    opts.progress?.({ step: "connected", version: String(s), tls });
+    opts.progress?.({ step: "connected", version: String(s), tls, verified });
     const role = roleInfo((await ctx.q(roleSql(profile)))[0] ?? {});
     await opts.checkRole?.(role);
     const facts = { publicSchemaCreate: v < 15e4 ? await ctx.q(PUBLIC_CREATE_SQL).then((r) => Boolean(r[0]?.open), () => null) : null };
@@ -1738,7 +1757,7 @@ async function collect(connectionString, opts = {}) {
       server: { versionNum: v, version: s },
       provider: providerId,
       hosting: hosting && HOSTING_LABELS.includes(hosting) ? hosting : null,
-      connection: { tls, local },
+      connection: { tls, local, verified },
       session: { ...role, tls, readOnly: true },
       target: fingerprint(connectionString),
       queryText: removed ? "removed" : "masked",
@@ -2020,7 +2039,7 @@ var CHECKS_A = [
       if (!all.length) return null;
       const waste = all.reduce((n, x) => n + num(x.bytes) * (1 - 1 / num(x.copies)), 0);
       if (waste < MB) return { note: `${all.length} ${pl(all.length, "set", "sets")} of duplicate indexes on tiny tables (${Math.round(waste / 1024)} KB wasted): ${all.slice(0, 3).map((x) => x.indexes).join("; ")}.` };
-      return { severity: waste >= 100 * MB ? "warning" : "info", title: `${all.length} ${pl(all.length, "set", "sets")} of duplicate indexes (${Math.round(waste / MB)} MB wasted)`, why: "Each copy doubles the write cost for no read benefit.", fix: "Keep one and DROP INDEX CONCURRENTLY the others.", evidence: top(all) };
+      return { severity: waste >= 100 * MB ? "warning" : "info", title: `${all.length} ${pl(all.length, "set", "sets")} of duplicate indexes (${Math.round(waste / MB)} MB wasted)`, why: "Each copy doubles the write cost for no read benefit.", fix: "Keep one, the primary key or unique one if there is such a one, and DROP INDEX CONCURRENTLY the others after checking that no constraint, replication setup or maintenance script refers to them by name.", evidence: top(all) };
     }
   },
   {
@@ -3905,7 +3924,7 @@ Nothing leaves this machine except through "upload", which sends the saved file 
 Exit codes: 0 completed, 1 regression or --fail-on match, 2 usage or runtime error, 3 remote login
   has more access than needed, 4 comparison inconclusive, 130 cancelled.`;
 function buildProgram(version, record, quiet = false) {
-  const program = new Command("pg-checkup").description("Read-only checkup of a PostgreSQL database, run on your machine.\nRuns every check, reads the findings together, and prints what to fix first, why, and how.").usage("[connection] [options]\n       pg-checkup <command> [options]").version(version, "-V, --version", "print the version").helpOption("--help", "show help").helpCommand(false).option("-o, --out <file>", "where to save the result; an existing file is never overwritten").option("--json", "the result as JSON on stdout; messages stay on stderr").option("--no-color", "plain text (NO_COLOR=1 does the same)").option("--no-input", "never prompt; for scripts and CI").option("--no-pace", "print all findings at once instead of one at a time").addHelpText("after", AFTER).showHelpAfterError("(run pg-checkup --help)").exitOverride();
+  const program = new Command("pg-checkup").description("Read-only checkup of a PostgreSQL database, run on your machine.\nRuns every check, reads the findings together, and prints what to fix first, why, and how.").usage("[connection] [options]\n       pg-checkup <command> [options]").version(version, "-V, --version", "print the version").helpOption("--help", "show help").helpCommand(false).option("-o, --out <file>", "where to save the result; an existing file is never overwritten").option("--json", "the result as JSON on stdout; messages stay on stderr").option("--no-color", "plain text (NO_COLOR=1 does the same)").option("--no-input", "never prompt; for scripts and CI").option("--no-pace", "print all findings at once instead of one at a time").option("--strict", "exit 1 when any diagnostic view could not be read (for CI)").addHelpText("after", AFTER).showHelpAfterError("(run pg-checkup --help)").exitOverride();
   if (quiet) program.configureOutput({ writeOut: () => {
   }, writeErr: () => {
   } });
@@ -4131,7 +4150,7 @@ function load(file) {
     throw e;
   }
   if (size > MAX_BUNDLE_BYTES) throw new Error("File exceeds the 3 MB inspection limit.");
-  const text = readFileSync2(file, "utf8");
+  const text = readFileSync3(file, "utf8");
   try {
     return { text, value: JSON.parse(text) };
   } catch {
@@ -4250,6 +4269,14 @@ var fails = (findings) => {
   const at = opt("fail-on");
   return at ? findings.some((f) => SEV_RANK.indexOf(f.severity) <= SEV_RANK.indexOf(at)) : false;
 };
+function strictFails(b) {
+  if (!flag("strict")) return false;
+  const broken = b.datasets.filter((d) => d.error);
+  if (!broken.length) return false;
+  say(`--strict: ${broken.length} diagnostic ${broken.length === 1 ? "view" : "views"} could not be read:`);
+  for (const d of broken) say(`  - ${d.title ?? d.id}: ${firstSentence(d.error)}`);
+  return true;
+}
 var markdown = (r, b) => toMarkdown(r.findings, r.datasets, { version: r.serverVersion, provider: r.provider, scannedAt: b.collectedAt, checks: r.checks });
 var withAnalysis = (b, r) => ({ ...b, findings: r.findings, checks: r.checks, skipped: r.skipped });
 var firstSentence = (s) => (s.match(/^[^.:]*[.:]?/)?.[0] ?? s).replace(/[.:]$/, "").trim();
@@ -4312,7 +4339,7 @@ async function scan() {
   const c = await connection2();
   const local = isLocalHost(c.url);
   const t0 = Date.now();
-  let tls = false;
+  let tls = false, verified = false;
   const b = await collect(c.url, {
     provider: provider2,
     queryText: flag("include-query-text") ? "masked" : "removed",
@@ -4324,17 +4351,19 @@ async function scan() {
     progress: (e) => {
       if (e.step === "connected") {
         tls = e.tls;
+        verified = e.verified;
         return;
       }
       if (process.stderr.isTTY && !flag("json")) process.stderr.write(`\rReading statistics views ${e.done}/${e.total}\u2026\x1B[K`);
     }
   });
   if (process.stderr.isTTY && !flag("json")) process.stderr.write("\r\x1B[K");
-  say(`Connected ${tls ? "with" : "without"} TLS${allowPrivilegedRole ? ", privileged-role check skipped" : ""}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1e3).toFixed(1)} s`);
+  say(`Connected ${tls ? verified ? "with TLS, certificate verified" : "with TLS, certificate not verified" : "without TLS"}${allowPrivilegedRole ? ", privileged-role check skipped" : ""}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1e3).toFixed(1)} s`);
+  if (tls && !verified && !local) say(`The server's certificate is not signed by a CA this machine trusts. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
   if (flag("include-query-text")) say("SQL text is kept with literals masked. Comments and identifiers can still be sensitive; read the file before sharing.");
   const saved = save(b, `pg-checkup-${safeName(c.database)}`, c.password);
   const r = await analyze(b, { provider: provider2 });
-  const code = fails(r.findings) ? 1 : 0;
+  const code = fails(r.findings) || strictFails(b) ? 1 : 0;
   if (flag("json")) {
     say(`Saved ${saved.file}`);
     process.stdout.write(json(withAnalysis(b, r)));
@@ -4370,10 +4399,11 @@ ${WORKLOAD_SQL};`);
   if (cmd === "doctor") {
     out(`pg-checkup ${COLLECTOR_VERSION}, Node ${process.version} on ${process.platform}`);
     const c = await connection2();
-    const { db, tls, local } = await openReadOnlySession(c.url);
+    const { db, tls, verified, local } = await openReadOnlySession(c.url);
     try {
       const [{ v, s }] = (await db.query(`select current_setting('server_version_num')::int as v, version() as s`)).rows;
-      out(`${ink(32, "\u2713")} Connected: ${String(s).split(" on ")[0].split(",")[0]} (${v}), ${tls ? "TLS" : "no TLS"}, read-only session${local ? ", local" : ""}`);
+      out(`${tls && !verified && !local ? ink(33, "!") : ink(32, "\u2713")} Connected: ${String(s).split(" on ")[0].split(",")[0]} (${v}), ${tls ? verified ? "TLS, certificate verified" : "TLS, certificate not verified" : "no TLS"}, read-only session${local ? ", local" : ""}`);
+      if (tls && !verified && !local) out(`    To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
       const role = roleInfo((await db.query(roleSql(profileFor(provider2 ?? providerIdFromUrl(c.url))))).rows[0] ?? {});
       const problems = roleProblems(role);
       out(`${problems.length ? local ? ink(33, "!") : ink(31, "\u2717") : ink(32, "\u2713")} Login ${role.role}: ${role.monitor ? "in pg_monitor" : "not in pg_monitor (other sessions may be hidden)"}${problems.length ? "" : ", statistics only"}`);
@@ -4392,7 +4422,7 @@ ${WORKLOAD_SQL};`);
     const b = parseBundle(value);
     if (cmd === "show") {
       const r = await analyze(b, { provider: provider2 });
-      const code = fails(r.findings) ? 1 : 0;
+      const code = fails(r.findings) || strictFails(b) ? 1 : 0;
       if (flag("json")) {
         process.stdout.write(json(withAnalysis(b, r)));
         return code;
