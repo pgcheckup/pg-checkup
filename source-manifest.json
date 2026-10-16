@@ -1,0 +1,34 @@
+{
+  "entry": "source/src/collector-cli.ts",
+  "files": [
+    "source/src/prompt.ts",
+    "source/src/connection.ts",
+    "source/src/provider.ts",
+    "source/src/dsutil.ts",
+    "source/src/inspect_more.ts",
+    "source/src/inspect_cap.ts",
+    "source/src/inspect_ops.ts",
+    "source/src/inspect.ts",
+    "source/src/bundle.ts",
+    "source/src/role.ts",
+    "source/src/fingerprint.ts",
+    "source/src/collect.ts",
+    "source/src/sections.ts",
+    "source/src/report.ts",
+    "source/src/snapshot.ts",
+    "source/src/cli-options.ts",
+    "source/src/workload.ts",
+    "source/src/collector-cli.ts",
+    "source/src/types.ts"
+  ],
+  "compiledOnly": [
+    "checkdef.ts",
+    "checks_a.ts",
+    "checks_b.ts",
+    "checks_c.ts",
+    "checks_d.ts",
+    "fixes-stub.ts",
+    "triage.ts",
+    "analyze.ts"
+  ]
+}

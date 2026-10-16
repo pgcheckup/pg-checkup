@@ -1,0 +1,41 @@
+{
+  "name": "pg-checkup",
+  "version": "0.3.0",
+  "description": "Read-only checkup of a PostgreSQL database, run on your machine. Nothing leaves it unless you say so.",
+  "type": "module",
+  "bin": {
+    "pg-checkup": "dist/pg-checkup.js"
+  },
+  "files": [
+    "dist",
+    "source",
+    "source-manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pgcheckup/pg-checkup.git"
+  },
+  "homepage": "https://pgcheckup.com/docs/local",
+  "bugs": {
+    "url": "https://github.com/pgcheckup/pg-checkup/issues"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "pg": "^8.13.0"
+  },
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "health-check",
+    "checkup",
+    "pg_stat_statements",
+    "read-only",
+    "migration"
+  ],
+  "license": "SEE LICENSE IN LICENSE"
+}
