@@ -1413,9 +1413,9 @@ var DEFS = [
       from pg_extension e join pg_namespace n on n.oid = e.extnamespace left join pg_available_extensions av on av.name = e.extname order by 4 desc, 1 limit 60`
   }
 ];
-function normalize(rows, cols) {
+function normalize(rows2, cols) {
   const kind = new Map(cols.map((c) => [c.key, c.kind ?? "text"]));
-  return rows.map((r) => {
+  return rows2.map((r) => {
     const out2 = {};
     for (const [k, v] of Object.entries(r)) {
       if (v instanceof Date) out2[k] = v.toISOString();
@@ -1442,8 +1442,8 @@ async function collectDatasets(c, onRead) {
       continue;
     }
     try {
-      const rows = normalize(await c.q(d.sql(c)), d.columns);
-      out2.push({ ...base2, rows, capped: rows.length >= (d.limit ?? 50) });
+      const rows2 = normalize(await c.q(d.sql(c)), d.columns);
+      out2.push({ ...base2, rows: rows2, capped: rows2.length >= (d.limit ?? 50) });
     } catch (e) {
       if (isConnectionLost(e)) throw e;
       out2.push({ ...base2, error: String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]") });
@@ -1529,14 +1529,14 @@ function parseBundle(input) {
     seen.add(id);
     const rowsIn = d.rows;
     if (!Array.isArray(rowsIn)) fail(`${id}.rows must be a list`);
-    const rows = rowsIn.slice(0, def.limit ?? 50).map((r, i) => {
+    const rows2 = rowsIn.slice(0, def.limit ?? 50).map((r, i) => {
       if (!isObj(r)) fail(`${id} row ${i} must be an object`);
       const entries = Object.entries(r);
       if (entries.length > 40) fail(`${id} row ${i} has too many fields`);
       return Object.fromEntries(entries.map(([k, v]) => [KEY.test(k) ? k : fail(`${id} has a field named "${k.slice(0, 40)}"`), cell(v, `${id}.${k}`)]));
     });
     const note = d.note, error = d.error;
-    datasets.push({ id, rows, capped: Boolean(d.capped), ...typeof note === "string" ? { note: note.slice(0, 500) } : {}, ...typeof error === "string" ? { error: error.slice(0, 500) } : {} });
+    datasets.push({ id, rows: rows2, capped: Boolean(d.capped), ...typeof note === "string" ? { note: note.slice(0, 500) } : {}, ...typeof error === "string" ? { error: error.slice(0, 500) } : {} });
   }
   const facts = isObj(b.facts) ? b.facts : {};
   const qt = b.queryText === "removed" ? "removed" : "masked";
@@ -1791,7 +1791,7 @@ var CATEGORY = {
 
 // src/checkdef.ts
 var pl = (n, one, many) => n === 1 ? one : many;
-var top = (rows, n = 10) => rows.slice(0, n);
+var top = (rows2, n = 10) => rows2.slice(0, n);
 var GB = 1024 ** 3;
 var MB = 1024 ** 2;
 
@@ -1820,8 +1820,8 @@ var CHECKS_A = [
     looks: "The share of total application query time taken by the top statement, after catalog and tooling queries are excluded.",
     flags: "Warning when one statement is 30% or more of at least 60 s of recorded application query time.",
     uses: ["q_total"],
-    run: ({ ctx, rows }) => {
-      const r = rows("q_total");
+    run: ({ ctx, rows: rows2 }) => {
+      const r = rows2("q_total");
       const t = r[0];
       const minMs = ctx.opts.minWorkloadMs ?? 6e4;
       if (!t) return { note: "No application statements recorded yet." };
@@ -1843,8 +1843,8 @@ var CHECKS_A = [
     looks: "Statements called 5+ times whose mean time is high.",
     flags: "Warning for any averaging 1 second or more.",
     uses: ["q_mean"],
-    run: ({ rows }) => {
-      const r = rows("q_mean").filter((x) => num(x.mean_ms) >= 1e3);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("q_mean").filter((x) => num(x.mean_ms) >= 1e3);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "query averages", "queries average")} over 1 second`,
@@ -1861,8 +1861,8 @@ var CHECKS_A = [
     looks: "Statements writing large temp files because work_mem is exceeded.",
     flags: "Info at roughly 800 MB or more of temp writes per statement.",
     uses: ["q_temp"],
-    run: ({ rows }) => {
-      const r = rows("q_temp").filter((x) => num(x.temp_bytes) >= 8192e5);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("q_temp").filter((x) => num(x.temp_bytes) >= 8192e5);
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "query spills", "queries spill")} heavily to temp files`,
@@ -1879,8 +1879,8 @@ var CHECKS_A = [
     looks: "Whether pg_stat_statements is dropping old statements.",
     flags: "Info when any statements were evicted.",
     uses: ["q_pgss"],
-    run: ({ rows }) => {
-      const r = rows("q_pgss")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("q_pgss")[0];
       return r && num(r.dealloc) > 0 ? {
         severity: "info",
         title: `${num(r.dealloc).toLocaleString()} statements were evicted from tracking`,
@@ -1898,8 +1898,8 @@ var CHECKS_A = [
     looks: "Tables over 50,000 rows read mostly by sequential scan.",
     flags: "Warning when seq scans exceed 100 and 5x the index scans.",
     uses: ["t_seq"],
-    run: ({ rows }) => {
-      const r = rows("t_seq").filter((x) => num(x.live_rows) > 5e4 && num(x.seq_scan) > 100 && num(x.seq_scan) > 5 * num(x.idx_scan));
+    run: ({ rows: rows2 }) => {
+      const r = rows2("t_seq").filter((x) => num(x.live_rows) > 5e4 && num(x.seq_scan) > 100 && num(x.seq_scan) > 5 * num(x.idx_scan));
       return r.length ? {
         severity: "warning",
         title: `${r.length} large ${pl(r.length, "table is", "tables are")} mostly read by sequential scan`,
@@ -1937,8 +1937,8 @@ var CHECKS_A = [
     looks: "Tables without a primary key.",
     flags: "Info for a table with 1,000+ rows or over 8 MB; smaller ones are only noted.",
     uses: ["t_nopk"],
-    run: ({ rows }) => {
-      const all = rows("t_nopk");
+    run: ({ rows: rows2 }) => {
+      const all = rows2("t_nopk");
       const r = all.filter((x) => num(x.est_rows) >= 1e3 || num(x.bytes) >= 8 * MB);
       if (r.length) return {
         severity: "info",
@@ -1957,8 +1957,8 @@ var CHECKS_A = [
     looks: "Tables with many changes since the last ANALYZE.",
     flags: "Warning when 20%+ of a 10k+ row table changed and it wasn't analyzed in the last day.",
     uses: ["t_stale"],
-    run: ({ rows }) => {
-      const r = rows("t_stale").filter((x) => num(x.live_rows) >= 1e4 && num(x.mod_pct) >= 20 && age(x.last_analyzed) > 86400);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("t_stale").filter((x) => num(x.live_rows) >= 1e4 && num(x.mod_pct) >= 20 && age(x.last_analyzed) > 86400);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "table has", "tables have")} stale planner statistics`,
@@ -1975,10 +1975,10 @@ var CHECKS_A = [
     looks: "Measured wasted space in the largest tables (needs pgstattuple).",
     flags: "Warning at 40%+ bloat when the waste is at least 5% of the database (never under 8 MB, never required above 100 MB); critical at 60%+ when it is 1 GB or a fifth of the database.",
     uses: ["t_bloat", "cfg_version"],
-    run: ({ ctx, rows }) => {
-      const db = num(rows("cfg_version")[0]?.db_bytes);
+    run: ({ ctx, rows: rows2 }) => {
+      const db = num(rows2("cfg_version")[0]?.db_bytes);
       const min = ctx.opts.minBloatBytes ?? Math.max(8 * MB, Math.min(100 * MB, 0.05 * db));
-      const r = rows("t_bloat").filter((x) => num(x.bloat_pct) >= 40 && num(x.wasted_bytes) >= min);
+      const r = rows2("t_bloat").filter((x) => num(x.bloat_pct) >= 40 && num(x.wasted_bytes) >= min);
       if (!r.length) return null;
       const wasted = r.reduce((a, x) => a + num(x.wasted_bytes), 0);
       const crit = r.some((x) => num(x.bloat_pct) >= 60 && (num(x.wasted_bytes) >= GB || db > 0 && num(x.wasted_bytes) >= 0.2 * db));
@@ -1999,8 +1999,8 @@ var CHECKS_A = [
     looks: "Indexes left invalid by a failed CREATE INDEX CONCURRENTLY.",
     flags: "Warning for any.",
     uses: ["i_invalid"],
-    run: ({ rows }) => {
-      const r = rows("i_invalid");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("i_invalid");
       return r.length ? {
         severity: "warning",
         title: `${r.length} invalid ${pl(r.length, "index", "indexes")}`,
@@ -2017,8 +2017,8 @@ var CHECKS_A = [
     looks: "Indexes over 8 MB that were never scanned since the stats reset.",
     flags: "Info for any.",
     uses: ["i_unused"],
-    run: ({ rows }) => {
-      const r = rows("i_unused").filter((x) => num(x.bytes) > 8 * MB);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("i_unused").filter((x) => num(x.bytes) > 8 * MB);
       return r.length ? {
         severity: "info",
         title: `${r.length} large ${pl(r.length, "index was", "indexes were")} never used`,
@@ -2035,8 +2035,8 @@ var CHECKS_A = [
     looks: "Identical indexes on the same table.",
     flags: "Info when they waste 1 MB or more; warning at 100 MB. Smaller ones are only noted.",
     uses: ["i_dup"],
-    run: ({ rows }) => {
-      const all = rows("i_dup");
+    run: ({ rows: rows2 }) => {
+      const all = rows2("i_dup");
       if (!all.length) return null;
       const waste = all.reduce((n, x) => n + num(x.bytes) * (1 - 1 / num(x.copies)), 0);
       if (waste < MB) return { note: `${all.length} ${pl(all.length, "set", "sets")} of duplicate indexes on tiny tables (${Math.round(waste / 1024)} KB wasted): ${all.slice(0, 3).map((x) => x.indexes).join("; ")}.` };
@@ -2050,8 +2050,8 @@ var CHECKS_A = [
     looks: "Non-unique indexes that are the leading columns of a longer index.",
     flags: "Info when the redundant index is 1 MB or more; smaller ones are only noted.",
     uses: ["i_redundant"],
-    run: ({ rows }) => {
-      const all = rows("i_redundant");
+    run: ({ rows: rows2 }) => {
+      const all = rows2("i_redundant");
       const r = all.filter((x) => num(x.bytes) >= MB);
       if (r.length) return { severity: "info", title: `${r.length} redundant ${pl(r.length, "index", "indexes")}`, why: "A longer index on the same columns already serves those queries.", fix: "Drop the shorter index after checking it isn't required by a constraint.", evidence: top(r) };
       return all.length ? { note: `${all.length} redundant ${pl(all.length, "index", "indexes")} on tiny tables (under 1 MB each): ${all.slice(0, 3).map((x) => x.redundant).join(", ")}. Not worth acting on yet.` } : null;
@@ -2064,8 +2064,8 @@ var CHECKS_A = [
     looks: "Foreign-key columns with no supporting index.",
     flags: "Warning when a referencing table has 10k+ rows; info at 1,000+. Smaller tables are only noted.",
     uses: ["i_fk"],
-    run: ({ rows }) => {
-      const all = rows("i_fk");
+    run: ({ rows: rows2 }) => {
+      const all = rows2("i_fk");
       const r = all.filter((x) => num(x.est_rows) >= 1e3);
       if (r.length) return {
         severity: r.some((x) => num(x.est_rows) >= 1e4) ? "warning" : "info",
@@ -2085,8 +2085,8 @@ var CHECKS_A = [
     looks: "How much of each sequence's range is used (integer keys run out at about 2.1 billion).",
     flags: "Warning at 70% used; critical at 90%.",
     uses: ["sch_seq"],
-    run: ({ rows }) => {
-      const all = rows("sch_seq");
+    run: ({ rows: rows2 }) => {
+      const all = rows2("sch_seq");
       const readable = all.filter((x) => x.readable);
       const hot = readable.filter((x) => num(x.pct_used) >= 70 && !x.cycle);
       if (hot.length) return {
@@ -2107,8 +2107,8 @@ var CHECKS_A = [
     looks: "Constraints added NOT VALID that were never validated.",
     flags: "Info for any.",
     uses: ["sch_notvalid"],
-    run: ({ rows }) => {
-      const r = rows("sch_notvalid");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("sch_notvalid");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "constraint is", "constraints are")} not validated`,
@@ -2125,8 +2125,8 @@ var CHECKS_A = [
     looks: "Triggers switched off.",
     flags: "Info for any.",
     uses: ["sch_triggers"],
-    run: ({ rows }) => {
-      const r = rows("sch_triggers");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("sch_triggers");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "trigger is", "triggers are")} disabled`,
@@ -2144,8 +2144,8 @@ var CHECKS_A = [
     looks: "Queries currently waiting for a lock held by another session.",
     flags: "Warning; critical if anything waits 30 s or more.",
     uses: ["b_blocked"],
-    run: ({ rows }) => {
-      const r = rows("b_blocked");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("b_blocked");
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.waiting_s) >= 30) ? "critical" : "warning",
@@ -2163,9 +2163,9 @@ var CHECKS_A = [
     looks: "Sessions that opened a transaction and went quiet.",
     flags: "Warning at 5 minutes idle.",
     uses: ["b_idle"],
-    run: ({ ctx, rows }) => {
+    run: ({ ctx, rows: rows2 }) => {
       const min = ctx.opts.idleTxnSeconds ?? 300;
-      const r = rows("b_idle").filter((x) => num(x.idle_s) >= min);
+      const r = rows2("b_idle").filter((x) => num(x.idle_s) >= min);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "session is", "sessions are")} idle in a transaction`,
@@ -2182,8 +2182,8 @@ var CHECKS_A = [
     looks: "Statements that have been executing for a long time.",
     flags: "Info at 5 minutes; warning at 30 minutes.",
     uses: ["b_running"],
-    run: ({ rows }) => {
-      const r = rows("b_running").filter((x) => num(x.running_s) >= 300);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("b_running").filter((x) => num(x.running_s) >= 300);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.running_s) >= 1800) ? "warning" : "info",
@@ -2201,8 +2201,8 @@ var CHECKS_A = [
     looks: "Two-phase-commit transactions left prepared.",
     flags: "Warning after 5 minutes; critical after 1 hour.",
     uses: ["b_prepared"],
-    run: ({ rows }) => {
-      const r = rows("b_prepared").filter((x) => num(x.age_s) >= 300);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("b_prepared").filter((x) => num(x.age_s) >= 300);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.age_s) >= 3600) ? "critical" : "warning",
@@ -2220,8 +2220,8 @@ var CHECKS_A = [
     looks: "The oldest xmin held by a session, slot, prepared transaction or standby.",
     flags: "Warning at 10 million transactions old; critical at 100 million.",
     uses: ["b_xmin"],
-    run: ({ rows }) => {
-      const r = rows("b_xmin");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("b_xmin");
       const t = r[0];
       if (!t || num(t.xmin_age) < 1e7) return null;
       return {
@@ -2241,8 +2241,8 @@ var CHECKS_A = [
     looks: "Client connections as a share of max_connections.",
     flags: "Warning at 80%; critical at 90%.",
     uses: ["c_limits"],
-    run: ({ rows }) => {
-      const r = rows("c_limits")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("c_limits")[0];
       if (!r || num(r.used_pct) < 80) return null;
       return {
         severity: num(r.used_pct) >= 90 ? "critical" : "warning",
@@ -2260,8 +2260,8 @@ var CHECKS_A = [
     looks: "Many mostly-idle connections.",
     flags: "Info at 50+ idle and 40%+ of max_connections.",
     uses: ["c_limits"],
-    run: ({ rows }) => {
-      const r = rows("c_limits")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("c_limits")[0];
       if (!r || num(r.idle) < 50 || num(r.idle) < 0.4 * num(r.max_connections)) return null;
       return {
         severity: "info",
@@ -2279,8 +2279,8 @@ var CHECKS_A = [
     looks: "Remote sessions connected without encryption (excludes this scan and provider services).",
     flags: "Warning for any.",
     uses: ["c_ssl"],
-    run: ({ rows }) => {
-      const r = rows("c_ssl").filter((x) => x.remote && !x.encrypted);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("c_ssl").filter((x) => x.remote && !x.encrypted);
       const n = r.reduce((a, x) => a + num(x.sessions), 0);
       return n ? {
         severity: "warning",
@@ -2325,8 +2325,8 @@ var CHECKS_B = [
     looks: "Inactive or lost replication slots that pin WAL.",
     flags: "Warning; critical if a slot is lost or retains 5 GB+.",
     uses: ["r_slots"],
-    run: ({ ctx, rows }) => {
-      const r = rows("r_slots").filter((x) => !ctx.profile.internalSlots.includes(String(x.slot))).filter((x) => !x.active || x.status === "unreserved" || x.status === "lost");
+    run: ({ ctx, rows: rows2 }) => {
+      const r = rows2("r_slots").filter((x) => !ctx.profile.internalSlots.includes(String(x.slot))).filter((x) => !x.active || x.status === "unreserved" || x.status === "lost");
       if (!r.length) return null;
       return {
         severity: r.some((x) => x.status === "lost" || num2(x.retained_bytes) > 5 * GB) ? "critical" : "warning",
@@ -2344,8 +2344,8 @@ var CHECKS_B = [
     looks: "Replay lag of connected replicas.",
     flags: "Warning at 60 s or 1 GB behind; critical at 300 s or 10 GB.",
     uses: ["r_standby"],
-    run: ({ rows }) => {
-      const r = rows("r_standby").filter((x) => num2(x.replay_lag_s) >= 60 || num2(x.replay_bytes) >= GB);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("r_standby").filter((x) => num2(x.replay_lag_s) >= 60 || num2(x.replay_bytes) >= GB);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.replay_lag_s) >= 300 || num2(x.replay_bytes) >= 10 * GB) ? "critical" : "warning",
@@ -2363,9 +2363,9 @@ var CHECKS_B = [
     looks: "Slots in use versus max_replication_slots.",
     flags: "Warning at 80%.",
     uses: ["r_slots"],
-    run: ({ rows, setting: setting2 }) => {
+    run: ({ rows: rows2, setting: setting2 }) => {
       const max = num2(setting2("max_replication_slots"));
-      const n = rows("r_slots").length;
+      const n = rows2("r_slots").length;
       if (!max || n < 0.8 * max) return null;
       return { severity: "warning", title: `${n} of ${max} replication slots in use`, why: "At the limit, new replicas and logical subscriptions fail to start.", fix: "Drop unused slots or raise max_replication_slots (needs a restart)." };
     }
@@ -2377,8 +2377,8 @@ var CHECKS_B = [
     looks: "Share of checkpoints forced by WAL volume.",
     flags: "Warning when over half of 50+ checkpoints are forced.",
     uses: ["r_checkpoints"],
-    run: ({ rows }) => {
-      const r = rows("r_checkpoints")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("r_checkpoints")[0];
       if (!r) return null;
       const total = num2(r.timed) + num2(r.requested);
       return total >= 50 && num2(r.requested) / total > 0.5 ? {
@@ -2397,8 +2397,8 @@ var CHECKS_B = [
     looks: "The size of pg_wal versus max_wal_size.",
     flags: "Warning when pg_wal is over twice max_wal_size and 1 GB.",
     uses: ["r_waldir"],
-    run: ({ rows, setting: setting2 }) => {
-      const r = rows("r_waldir")[0];
+    run: ({ rows: rows2, setting: setting2 }) => {
+      const r = rows2("r_waldir")[0];
       const max = num2(setting2("max_wal_size")) * 1024 * 1024;
       if (!r || !max) return null;
       return num2(r.bytes) > 2 * max && num2(r.bytes) > GB ? {
@@ -2417,8 +2417,8 @@ var CHECKS_B = [
     looks: "The most recent archive attempt.",
     flags: "Critical when the latest attempt failed.",
     uses: ["r_archiver"],
-    run: ({ rows }) => {
-      const r = rows("r_archiver")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("r_archiver")[0];
       if (!r || num2(r.failed_count) === 0) return null;
       return ts(r.last_failed_time) > ts(r.last_archived_time) ? {
         severity: "critical",
@@ -2437,8 +2437,8 @@ var CHECKS_B = [
     looks: "Tables with a large share of dead rows.",
     flags: "Warning at 20%+ (and 10k+ rows); critical at 50%+.",
     uses: ["v_dead"],
-    run: ({ rows }) => {
-      const r = rows("v_dead").filter((x) => num2(x.dead_rows) > 1e4 && num2(x.dead_pct) > 20);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("v_dead").filter((x) => num2(x.dead_rows) > 1e4 && num2(x.dead_pct) > 20);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.dead_pct) > 50) ? "critical" : "warning",
@@ -2465,8 +2465,8 @@ var CHECKS_B = [
     looks: "Tables with lots of writes that were never vacuumed.",
     flags: "Warning for any table with 10k+ writes and no vacuum.",
     uses: ["v_never"],
-    run: ({ rows }) => {
-      const r = rows("v_never");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("v_never");
       return r.length ? {
         severity: "warning",
         title: `${r.length} busy ${pl(r.length, "table has", "tables have")} never been vacuumed`,
@@ -2483,8 +2483,8 @@ var CHECKS_B = [
     looks: "Table XID age versus autovacuum_freeze_max_age.",
     flags: "Warning at 80%; critical at 95%.",
     uses: ["v_age"],
-    run: ({ rows }) => {
-      const r = rows("v_age").filter((x) => num2(x.pct) >= 80);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("v_age").filter((x) => num2(x.pct) >= 80);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.pct) >= 95) ? "critical" : "warning",
@@ -2502,8 +2502,8 @@ var CHECKS_B = [
     looks: "The oldest transaction ID versus the ~2.1 billion limit.",
     flags: "Warning at 1.0 billion; critical at 1.5 billion.",
     uses: ["v_dbage"],
-    run: ({ rows }) => {
-      const r = rows("v_dbage");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("v_dbage");
       const w = Math.max(0, ...r.map((x) => num2(x.xid_age)));
       if (w < 1e9) return null;
       return {
@@ -2522,8 +2522,8 @@ var CHECKS_B = [
     looks: "The oldest MultiXact ID versus its limit.",
     flags: "Warning at 1.0 billion; critical at 1.5 billion.",
     uses: ["v_dbage"],
-    run: ({ rows }) => {
-      const r = rows("v_dbage");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("v_dbage");
       const w = Math.max(0, ...r.map((x) => num2(x.mxid_age)));
       if (w < 1e9) return null;
       return {
@@ -2590,7 +2590,7 @@ var CHECKS_B = [
     flags: "Info when off.",
     selfHosted: true,
     uses: ["cfg_version"],
-    run: ({ rows }) => rows("cfg_version")[0]?.data_checksums === "off" ? { severity: "info", title: "Data checksums are off", why: "Silent storage corruption goes undetected until it is read.", fix: "Enable with pg_checksums --enable (offline) or when initializing a new cluster." } : null
+    run: ({ rows: rows2 }) => rows2("cfg_version")[0]?.data_checksums === "off" ? { severity: "info", title: "Data checksums are off", why: "Silent storage corruption goes undetected until it is read.", fix: "Enable with pg_checksums --enable (offline) or when initializing a new cluster." } : null
   },
   {
     id: "config.shared_buffers_default",
@@ -2600,7 +2600,7 @@ var CHECKS_B = [
     flags: "Info when default and the database is over 2 GB.",
     selfHosted: true,
     uses: ["cfg_version"],
-    run: ({ rows, setting: setting2 }) => setting2("shared_buffers") === "16384" && num2(rows("cfg_version")[0]?.db_bytes) > 2 * GB ? {
+    run: ({ rows: rows2, setting: setting2 }) => setting2("shared_buffers") === "16384" && num2(rows2("cfg_version")[0]?.db_bytes) > 2 * GB ? {
       severity: "info",
       title: "shared_buffers is at the 128 MB default",
       why: "A large database with a tiny cache reads from disk far more than needed.",
@@ -2614,7 +2614,7 @@ var CHECKS_B = [
     looks: "Default work_mem alongside heavy temp-file use.",
     flags: "Info when work_mem is 4 MB and over 1 GB was spilled.",
     uses: ["l_db"],
-    run: ({ rows, setting: setting2 }) => setting2("work_mem") === "4096" && num2(rows("l_db")[0]?.temp_bytes) >= GB ? {
+    run: ({ rows: rows2, setting: setting2 }) => setting2("work_mem") === "4096" && num2(rows2("l_db")[0]?.temp_bytes) >= GB ? {
       severity: "info",
       title: "Queries spill over 1 GB to temp files with default work_mem",
       why: "Sorts and hashes are running on disk.",
@@ -2628,8 +2628,8 @@ var CHECKS_B = [
     looks: "The major version's end-of-life date.",
     flags: "Critical after end of life; warning within 180 days.",
     uses: ["cfg_version"],
-    run: ({ rows }) => {
-      const v = rows("cfg_version")[0];
+    run: ({ rows: rows2 }) => {
+      const v = rows2("cfg_version")[0];
       if (!v) return null;
       const s = eolStatus(num2(v.version_num));
       if (!s.date || s.daysLeft === null) return null;
@@ -2678,8 +2678,8 @@ var CHECKS_B = [
     looks: "Deadlocks since the stats reset.",
     flags: "Info for any; warning at 10+.",
     uses: ["l_db"],
-    run: ({ rows }) => {
-      const n = num2(rows("l_db")[0]?.deadlocks);
+    run: ({ rows: rows2 }) => {
+      const n = num2(rows2("l_db")[0]?.deadlocks);
       return n > 0 ? {
         severity: n >= 10 ? "warning" : "info",
         title: `${n} ${pl(n, "deadlock", "deadlocks")} since the stats reset`,
@@ -2695,8 +2695,8 @@ var CHECKS_B = [
     looks: "Rollbacks as a share of transactions.",
     flags: "Info at 20%+ (with 10k+ transactions).",
     uses: ["l_db"],
-    run: ({ rows }) => {
-      const r = rows("l_db")[0];
+    run: ({ rows: rows2 }) => {
+      const r = rows2("l_db")[0];
       return r && num2(r.rollback_pct) >= 20 && num2(r.commits) + num2(r.rollbacks) >= 1e4 ? {
         severity: "info",
         title: `${r.rollback_pct}% of transactions roll back`,
@@ -2712,7 +2712,7 @@ var CHECKS_B = [
     looks: "Checksum failures recorded by the database.",
     flags: "Critical for any.",
     uses: ["l_db"],
-    run: ({ rows }) => num2(rows("l_db")[0]?.checksum_failures) > 0 ? { severity: "critical", title: "Data checksum failures detected", why: "Storage returned corrupted pages.", fix: "Check hardware and storage, and restore affected data from a good backup." } : null
+    run: ({ rows: rows2 }) => num2(rows2("l_db")[0]?.checksum_failures) > 0 ? { severity: "critical", title: "Data checksum failures detected", why: "Storage returned corrupted pages.", fix: "Check hardware and storage, and restore affected data from a good backup." } : null
   },
   // ───────── Security
   {
@@ -2722,8 +2722,8 @@ var CHECKS_B = [
     looks: "Login roles with SUPERUSER, BYPASSRLS or REPLICATION (provider-managed roles ignored).",
     flags: "Info when there is more than one.",
     uses: ["s_roles"],
-    run: ({ ctx, rows }) => {
-      const r = rows("s_roles").filter((x) => x.login && (x.superuser || x.bypassrls || x.replication)).filter((x) => !ctx.profile.expectedAdmins.includes(String(x.role)));
+    run: ({ ctx, rows: rows2 }) => {
+      const r = rows2("s_roles").filter((x) => x.login && (x.superuser || x.bypassrls || x.replication)).filter((x) => !ctx.profile.expectedAdmins.includes(String(x.role)));
       const allowance = ctx.profile.expectedAdmins.length ? 0 : 1;
       return r.length > allowance ? {
         severity: "info",
@@ -2741,8 +2741,8 @@ var CHECKS_B = [
     looks: "Policies whose gating expression is always true, split by whether they allow writes or only reads.",
     flags: "Warning when a write (INSERT, UPDATE, DELETE, ALL) policy is always true. Info when only SELECT policies are, since public read access is normal for reference data.",
     uses: ["s_policies"],
-    run: ({ rows }) => {
-      const all = rows("s_policies").filter((x) => x.always_true);
+    run: ({ rows: rows2 }) => {
+      const all = rows2("s_policies").filter((x) => x.always_true);
       if (!all.length) return null;
       const writes = all.filter((x) => String(x.cmd).toUpperCase() !== "SELECT"), reads = all.filter((x) => String(x.cmd).toUpperCase() === "SELECT");
       if (writes.length) return {
@@ -2769,8 +2769,8 @@ var CHECKS_B = [
     looks: "SECURITY DEFINER functions without a fixed search_path.",
     flags: "Warning for any.",
     uses: ["s_definer"],
-    run: ({ rows }) => {
-      const r = rows("s_definer").filter((x) => !x.search_path_set);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("s_definer").filter((x) => !x.search_path_set);
       return r.length ? {
         severity: "warning",
         title: `${r.length} SECURITY DEFINER ${pl(r.length, "function has", "functions have")} no fixed search_path`,
@@ -2788,8 +2788,8 @@ var CHECKS_B = [
     flags: "Critical for any (Supabase).",
     providers: ["supabase"],
     uses: ["s_exposure"],
-    run: ({ rows }) => {
-      const r = rows("s_exposure");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("s_exposure");
       return r.length ? {
         severity: "critical",
         title: `${r.length} public ${pl(r.length, "table is", "tables are")} readable by anyone with the anon key`,
@@ -2807,8 +2807,8 @@ var CHECKS_B = [
     flags: "Critical for any.",
     selfHosted: true,
     uses: ["s_hba"],
-    run: ({ rows }) => {
-      const r = rows("s_hba").filter((x) => x.method === "trust" && x.address && !["127.0.0.1", "::1"].includes(String(x.address)));
+    run: ({ rows: rows2 }) => {
+      const r = rows2("s_hba").filter((x) => x.method === "trust" && x.address && !["127.0.0.1", "::1"].includes(String(x.address)));
       return r.length ? {
         severity: "critical",
         title: `${r.length} pg_hba rule${r.length > 1 ? "s allow" : " allows"} remote connections without a password`,
@@ -2857,8 +2857,8 @@ var CHECKS_B = [
     looks: "Installed extensions with a newer version available.",
     flags: "Info for any.",
     uses: ["e_installed"],
-    run: ({ rows }) => {
-      const r = rows("e_installed").filter((x) => x.update);
+    run: ({ rows: rows2 }) => {
+      const r = rows2("e_installed").filter((x) => x.update);
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "extension has", "extensions have")} an update available`,
@@ -2881,9 +2881,9 @@ var CHECKS_C = [
     flags: "Warning at 1 GB+ (info below); off means you can only restore to the last base backup, never a point in time.",
     selfHosted: true,
     uses: ["bk_archiving", "cfg_version"],
-    run: ({ rows }) => {
-      const a = rows("bk_archiving")[0];
-      const db = num3(rows("cfg_version")[0]?.db_bytes);
+    run: ({ rows: rows2 }) => {
+      const a = rows2("bk_archiving")[0];
+      const db = num3(rows2("cfg_version")[0]?.db_bytes);
       if (!a) return null;
       if (a.wal_level === "minimal") return { severity: "warning", title: "wal_level is minimal: no point-in-time recovery or replication", why: "Minimal WAL can't be archived or streamed, so the only recovery is the last full backup.", fix: "Set wal_level = replica (restart), then enable archiving with a tool such as pgBackRest.", evidence: a };
       if (a.archive_mode !== "off") return null;
@@ -2898,8 +2898,8 @@ var CHECKS_C = [
     flags: "Critical when found.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows }) => {
-      const a = rows("bk_archiving")[0];
+    run: ({ rows: rows2 }) => {
+      const a = rows2("bk_archiving")[0];
       return a && String(a.tool).startsWith("no-op") ? { severity: "critical", title: "archive_command discards WAL (it always reports success)", why: "Postgres deletes each WAL segment once the command succeeds, so this silently destroys your recovery history.", fix: "Replace it with a real archiver (pgBackRest, WAL-G, Barman) that copies the file and exits non-zero on failure.", evidence: a } : null;
     }
   },
@@ -2911,8 +2911,8 @@ var CHECKS_C = [
     flags: "Warning at 10 segments behind; critical at 100.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows }) => {
-      const a = rows("bk_archiving")[0];
+    run: ({ rows: rows2 }) => {
+      const a = rows2("bk_archiving")[0];
       const n = num3(a?.segments_behind);
       if (!a || a.segments_behind === null || n < 10) return null;
       return { severity: n >= 100 ? "critical" : "warning", title: `${n} WAL segments are waiting to be archived`, why: "A growing backlog fills pg_wal and widens the data you'd lose. If it fills the disk, the server shuts down.", fix: "Check the archive command's output and destination, and monitor pg_stat_archiver.", evidence: a };
@@ -2926,8 +2926,8 @@ var CHECKS_C = [
     flags: "Info when 0 on a self-managed server.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows }) => {
-      const a = rows("bk_archiving")[0];
+    run: ({ rows: rows2 }) => {
+      const a = rows2("bk_archiving")[0];
       return a && a.archive_mode !== "off" && num3(a.archive_timeout_s) === 0 ? {
         severity: "info",
         title: "archive_timeout is 0: recent transactions can sit unarchived indefinitely",
@@ -2945,9 +2945,9 @@ var CHECKS_C = [
     flags: "Warning when replicas exist but nothing is archived.",
     selfHosted: true,
     uses: ["r_standby", "bk_archiving"],
-    run: ({ rows }) => {
-      const s = rows("r_standby");
-      const a = rows("bk_archiving")[0];
+    run: ({ rows: rows2 }) => {
+      const s = rows2("r_standby");
+      const a = rows2("bk_archiving")[0];
       return s.length && a?.archive_mode === "off" ? {
         severity: "warning",
         title: `${s.length} ${pl(s.length, "replica", "replicas")} but no backup archive`,
@@ -2964,8 +2964,8 @@ var CHECKS_C = [
     looks: "Unlogged tables and custom tablespaces.",
     flags: "Info for any.",
     uses: ["bk_unprotected"],
-    run: ({ rows }) => {
-      const r = rows("bk_unprotected").filter((x) => x.kind === "Unlogged table" || x.kind === "Tablespace");
+    run: ({ rows: rows2 }) => {
+      const r = rows2("bk_unprotected").filter((x) => x.kind === "Unlogged table" || x.kind === "Tablespace");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "object isn't", "objects aren't")} fully covered by backups`,
@@ -3378,7 +3378,7 @@ var CHECKS_D = [
     flags: "Info at 5 or more; warning at 20 or more, or when they are hours old with keepalives at the OS default.",
     uses: ["c_stale"],
     run: (x) => {
-      const rows = x.rows("c_stale"), n = rows.reduce((a, r) => a + num4(r.sessions), 0), oldest = Math.max(0, ...rows.map((r) => num4(r.oldest_idle_s)));
+      const rows2 = x.rows("c_stale"), n = rows2.reduce((a, r) => a + num4(r.sessions), 0), oldest = Math.max(0, ...rows2.map((r) => num4(r.oldest_idle_s)));
       if (n < 5) return null;
       const set = (name) => x.rows("c_timeouts").find((r) => r.name === name)?.setting;
       const osDefault = String(set("tcp_keepalives_idle") ?? "0") === "0";
@@ -3388,7 +3388,7 @@ var CHECKS_D = [
         why: "Idle is normal for a connection pool, but a client that crashed or lost its network leaves a session that looks identical. Postgres only notices when the operating system's keepalive fires, which defaults to two hours or more. Until then each one holds a connection slot and memory.",
         fix: "First check that they're dead, not pooled on purpose: compare with the application's pool size. Then make dead peers drop quickly: set tcp_keepalives_idle = 60, tcp_keepalives_interval = 10 and tcp_keepalives_count = 6, and on PostgreSQL 14+ set client_connection_check_interval = '10s' so running queries stop when the client has gone. Set your pool's idle timeout below the firewall's. idle_session_timeout (PostgreSQL 14+) also works, but it closes healthy idle connections too, so use it only if your clients reconnect cleanly.",
         sql: "-- self-managed servers (managed providers: set these in the dashboard's database settings)\nALTER SYSTEM SET tcp_keepalives_idle = 60;\nALTER SYSTEM SET tcp_keepalives_interval = 10;\nALTER SYSTEM SET tcp_keepalives_count = 6;\nALTER SYSTEM SET client_connection_check_interval = '10s';  -- PostgreSQL 14+\nSELECT pg_reload_conf();\n",
-        evidence: rows.slice(0, 10)
+        evidence: rows2.slice(0, 10)
       };
     }
   }
@@ -3422,7 +3422,7 @@ var HORIZON_MIN = 1e5;
 function triage(input, datasets, vitals = []) {
   const fs = input.map(({ priority: _p, cause: _c, note: _n, ...f }) => ({ ...f, priority: DEFAULT[f.severity] ?? "watch" }));
   const by = (id) => fs.find((f) => f.id === id);
-  const rows = (id) => datasets.find((d) => d.id === id)?.rows ?? [];
+  const rows2 = (id) => datasets.find((d) => d.id === id)?.rows ?? [];
   const notes = /* @__PURE__ */ new Map();
   const note = (f, s) => notes.set(f.id, [...notes.get(f.id) ?? [], s]);
   const rank = (p) => PRIORITIES.indexOf(p);
@@ -3431,19 +3431,19 @@ function triage(input, datasets, vitals = []) {
     effect.cause = cause.id;
     if (rank(cause.priority) > rank(effect.priority)) cause.priority = effect.priority;
   };
-  const deadPct = new Map(rows("v_dead").map((r) => [String(r.table), num5(r.dead_pct)]));
+  const deadPct = new Map(rows2("v_dead").map((r) => [String(r.table), num5(r.dead_pct)]));
   const dead = by("vacuum.dead_tuples");
   const deadTables = tablesIn(dead);
-  const top2 = rows("b_xmin")[0];
+  const top2 = rows2("b_xmin")[0];
   const horizon = by("blocking.vacuum_horizon");
   let holder;
   if (top2 && (horizon || num5(top2.xmin_age) >= HORIZON_MIN)) {
     const ref = String(top2.ref ?? "");
-    const pidIn = (id) => rows(id).some((r) => String(r.pid) === ref);
+    const pidIn = (id) => rows2(id).some((r) => String(r.pid) === ref);
     const session = top2.holder === "Backend session";
     holder = (session && pidIn("b_idle") ? by("blocking.idle_in_transaction") : void 0) ?? (session && pidIn("b_running") ? by("blocking.long_running_queries") : void 0) ?? (top2.holder === "Prepared transaction" ? by("blocking.prepared_transactions") : void 0) ?? (top2.holder === "Replication slot" ? by("replication.bad_slots") : void 0) ?? horizon;
   }
-  const who = !top2 ? "" : top2.holder === "Backend session" ? rows("b_idle").some((r) => String(r.pid) === String(top2.ref)) ? `the session idle in a transaction (PID ${top2.ref})` : rows("b_running").some((r) => String(r.pid) === String(top2.ref)) ? `the query running as PID ${top2.ref}` : `the transaction in PID ${top2.ref}` : top2.holder === "Prepared transaction" ? `the prepared transaction ${top2.ref}` : top2.holder === "Replication slot" ? `the replication slot ${top2.ref}` : `the standby ${top2.ref}`;
+  const who = !top2 ? "" : top2.holder === "Backend session" ? rows2("b_idle").some((r) => String(r.pid) === String(top2.ref)) ? `the session idle in a transaction (PID ${top2.ref})` : rows2("b_running").some((r) => String(r.pid) === String(top2.ref)) ? `the query running as PID ${top2.ref}` : `the transaction in PID ${top2.ref}` : top2.holder === "Prepared transaction" ? `the prepared transaction ${top2.ref}` : top2.holder === "Replication slot" ? `the replication slot ${top2.ref}` : `the standby ${top2.ref}`;
   const effects = HOLDS_VACUUM.map(by).filter((f) => Boolean(f));
   if (holder && effects.length) {
     holder.priority = "now";
@@ -3489,10 +3489,10 @@ function triage(input, datasets, vitals = []) {
   }
   const blocked = by("blocking.lock_waits");
   if (blocked) {
-    const bl = rows("b_blocked");
+    const bl = rows2("b_blocked");
     const idle = by("blocking.idle_in_transaction"), running = by("blocking.long_running_queries");
     const fromIdle = bl.find((r) => r.blocking_state === "idle in transaction");
-    const fromRunning = bl.find((r) => rows("b_running").some((x) => String(x.pid) === String(r.blocking_pid)));
+    const fromRunning = bl.find((r) => rows2("b_running").some((x) => String(x.pid) === String(r.blocking_pid)));
     if (fromIdle && idle) {
       link(idle, blocked);
       note(blocked, `The blocking session (PID ${fromIdle.blocking_pid}) is idle in a transaction. Ending that transaction releases the lock.`);
@@ -3504,7 +3504,7 @@ function triage(input, datasets, vitals = []) {
   }
   const sat = by("connections.saturation");
   if (sat) {
-    const c = rows("c_limits")[0];
+    const c = rows2("c_limits")[0];
     const idleConns = by("connections.idle_sessions");
     if (blocked) {
       link(blocked, sat);
@@ -3531,7 +3531,7 @@ function triage(input, datasets, vitals = []) {
       note(f, "The statements writing the temp files are in the queries finding listed before this one. Raise work_mem only for the roles that run them: a global increase applies to every sort in every connection.");
     }
   }
-  const reset = rows("l_db")[0]?.stats_reset;
+  const reset = rows2("l_db")[0]?.stats_reset;
   const uptime = vitals.find((v) => v.label === "Uptime")?.value;
   const windowS = reset ? (Date.now() - new Date(String(reset)).getTime()) / 1e3 : typeof uptime === "number" ? uptime : null;
   const unused = by("indexes.unused");
@@ -3541,16 +3541,16 @@ function triage(input, datasets, vitals = []) {
   }
   const out2 = fs.map((f) => ({ ...f, ...notes.has(f.id) ? { note: notes.get(f.id).join(" ") } : {} })).sort((a, b) => rank(a.priority) - rank(b.priority) || SEV.indexOf(a.severity) - SEV.indexOf(b.severity));
   for (let pass = 0; pass < out2.length; pass++) {
-    let moved = false;
+    let moved2 = false;
     for (let i = 0; i < out2.length; i++) {
       const j = out2[i].cause ? out2.findIndex((f) => f.id === out2[i].cause) : -1;
       if (j > i) {
         out2.splice(i, 0, out2.splice(j, 1)[0]);
-        moved = true;
+        moved2 = true;
         break;
       }
     }
-    if (!moved) break;
+    if (!moved2) break;
   }
   return out2;
 }
@@ -3569,8 +3569,8 @@ async function evaluate(def, ctx, byId) {
     if (d.error) return skip(`Couldn't read ${d.title.toLowerCase()}: ${d.error}`);
     if (d.note) return skip(d.note);
   }
-  const rows = (id) => byId[id]?.rows ?? [];
-  const x = { ctx, d: byId, rows, setting: (name) => {
+  const rows2 = (id) => byId[id]?.rows ?? [];
+  const x = { ctx, d: byId, rows: rows2, setting: (name) => {
     for (const d of Object.values(byId)) for (const r of d.rows) if (r.name === name && "setting" in r) return String(r.setting);
   } };
   try {
@@ -3625,9 +3625,9 @@ function toMarkdown(findings, datasets = [], meta = {}) {
   const n = (s) => findings.filter((f) => f.severity === s).length;
   const active = (meta.checks ?? []).filter((c) => c.status !== "na");
   const passed = active.filter((c) => c.status === "passed").length;
-  const when = meta.scannedAt ? new Date(meta.scannedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "";
+  const when2 = meta.scannedAt ? new Date(meta.scannedAt).toISOString().replace("T", " ").slice(0, 16) + " UTC" : "";
   const out2 = ["# Postgres health report", ""];
-  const facts = [meta.version && `**Server:** ${meta.version}${meta.provider && meta.provider !== "generic" ? ` (${meta.provider})` : ""}`, when && `**Scanned:** ${when}`].filter(Boolean);
+  const facts = [meta.version && `**Server:** ${meta.version}${meta.provider && meta.provider !== "generic" ? ` (${meta.provider})` : ""}`, when2 && `**Scanned:** ${when2}`].filter(Boolean);
   if (facts.length) out2.push(facts.join("  \xB7  "), "");
   out2.push("## Summary", "", "| Critical | Warning | Info | Checks passed |", "|:-:|:-:|:-:|:-:|", `| ${n("critical")} | ${n("warning")} | ${n("info")} | ${active.length ? `${passed} / ${active.length}` : "-"} |`, "");
   out2.push(`## Findings (${findings.length})`, "");
@@ -3738,7 +3738,7 @@ var major = (n) => Math.floor(n / 1e4);
 var host = (s) => s.hosting ?? (s.provider === "generic" ? "a self-managed or unrecognised host" : s.provider);
 function diffSnapshots(before, after) {
   const out2 = [];
-  const moved = before.provider !== after.provider || before.hosting !== after.hosting;
+  const moved2 = before.provider !== after.provider || before.hosting !== after.hosting;
   const versionChanged = major(before.server.versionNum) !== major(after.server.versionNum);
   if (versionChanged) out2.push({ kind: "server", object: "PostgreSQL version", change: "changed", before: String(major(before.server.versionNum)), after: String(major(after.server.versionNum)), verdict: "review", why: "A new major version can change query plans and behaviour. Read the release notes' incompatibilities section for every version in between." });
   for (const f of ["encoding", "collate", "ctype"]) {
@@ -3759,7 +3759,7 @@ function diffSnapshots(before, after) {
       const was = a[k], now = b[k];
       if (was === now) continue;
       const change = was === void 0 ? "added" : now === void 0 ? "missing" : "changed";
-      out2.push({ kind, object: k, change, ...was !== void 0 ? { before: was } : {}, ...now !== void 0 ? { after: now } : {}, ...verdict(kind, k, change, was, now, { moved, versionChanged, from: before, to: after, extOf }) });
+      out2.push({ kind, object: k, change, ...was !== void 0 ? { before: was } : {}, ...now !== void 0 ? { after: now } : {}, ...verdict(kind, k, change, was, now, { moved: moved2, versionChanged, from: before, to: after, extOf }) });
     }
   }
   for (const [t, was] of Object.entries(before.tables)) {
@@ -3787,8 +3787,8 @@ function diffSnapshots(before, after) {
       change: was === void 0 ? "added" : now === void 0 ? "missing" : "changed",
       before: was,
       after: now,
-      verdict: moved ? "expected" : k === "timezone" || k === "search_path" || k === "default_transaction_isolation" || k === "standard_conforming_strings" ? "review" : "expected",
-      why: moved ? `Server settings are set by the host, and this database moved from ${host(before)} to ${host(after)}.` : "Check that the application doesn't depend on the old value."
+      verdict: moved2 ? "expected" : k === "timezone" || k === "search_path" || k === "default_transaction_isolation" || k === "standard_conforming_strings" ? "review" : "expected",
+      why: moved2 ? `Server settings are set by the host, and this database moved from ${host(before)} to ${host(after)}.` : "Check that the application doesn't depend on the old value."
     });
   }
   const order = { regression: 0, review: 1, expected: 2 };
@@ -3859,6 +3859,129 @@ function diffText(diffs, before, after) {
   return lines.join("\n");
 }
 var short = (s) => s.length > 80 ? `${s.slice(0, 77)}...` : s;
+
+// src/checkup-compare.ts
+var COMPARISON_FORMAT = "pg-checkup-comparison";
+var SEV2 = ["critical", "warning", "info"];
+var BETTER = { "Cache hit rate": "higher", Connections: "lower", Deadlocks: "lower" };
+var moved = (before, after) => before !== null && after !== null && after !== before && Math.abs(after - before) >= Math.max(5e-3 * Math.abs(before), 1e-9);
+var slim = (f) => ({ id: f.id, title: f.title, severity: f.severity });
+var num6 = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+var rows = (b, id) => b.datasets.find((d) => d.id === id)?.rows ?? [];
+var hours = (ms) => Math.round(ms / 36e4) / 10;
+function window(b) {
+  const at = Date.parse(b.collectedAt);
+  const reset = rows(b, "l_db")[0]?.stats_reset;
+  if (reset && Date.parse(String(reset))) return hours(at - Date.parse(String(reset)));
+  const up = num6(b.vitals?.uptime_s);
+  return up === null ? null : hours(up * 1e3);
+}
+function compareCheckups(a, b) {
+  const was = new Map(a.findings.map((f) => [f.id, f])), now = new Map(b.findings.map((f) => [f.id, f]));
+  const passed = new Set(b.checks.filter((c) => c.status === "passed").map((c) => c.id));
+  const fixed = a.findings.filter((f) => !now.has(f.id) && passed.has(f.id)).map(slim);
+  const unknown = a.findings.filter((f) => !now.has(f.id) && !passed.has(f.id)).map(slim);
+  const added = b.findings.filter((f) => !was.has(f.id)).map(slim);
+  const open = b.findings.filter((f) => was.has(f.id)).map(slim);
+  const worse = b.findings.filter((f) => was.has(f.id) && SEV2.indexOf(f.severity) < SEV2.indexOf(was.get(f.id).severity)).map(slim);
+  const vb = new Map(a.vitals.map((v) => [v.label, v])), va = new Map(b.vitals.map((v) => [v.label, v]));
+  const numbers = [.../* @__PURE__ */ new Set([...vb.keys(), ...va.keys()])].filter((l) => l !== "Uptime").map((label) => {
+    const x = vb.get(label), y = va.get(label);
+    return { label, before: num6(x?.value), after: num6(y?.value), kind: (y ?? x)?.kind, better: BETTER[label] ?? null };
+  }).filter((n) => n.before !== null || n.after !== null);
+  const named = /* @__PURE__ */ new Set();
+  for (const f of [...a.findings, ...b.findings]) for (const e of Array.isArray(f.evidence) ? f.evidence : f.evidence ? [f.evidence] : []) if (typeof e.table === "string") named.add(e.table);
+  const deadB = new Map(rows(a.bundle, "v_dead").map((r) => [String(r.table), r])), deadA = new Map(rows(b.bundle, "v_dead").map((r) => [String(r.table), r]));
+  const cappedB = a.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true, cappedA = b.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true;
+  const dead = (m, capped, t, key) => m.has(t) ? num6(m.get(t)[key]) : capped ? null : 0;
+  const tables = [...new Set([...named].filter((t) => deadB.has(t) || deadA.has(t)))].map((table) => ({
+    table,
+    deadBefore: dead(deadB, cappedB, table, "dead_rows"),
+    deadAfter: dead(deadA, cappedA, table, "dead_rows"),
+    pctBefore: dead(deadB, cappedB, table, "dead_pct"),
+    pctAfter: dead(deadA, cappedA, table, "dead_pct")
+  })).sort((x, y) => (y.deadBefore ?? 0) - (x.deadBefore ?? 0)).slice(0, 10);
+  const resetAt = rows(b.bundle, "l_db")[0]?.stats_reset;
+  const statsReset = Boolean(resetAt && Date.parse(String(resetAt)) > Date.parse(a.bundle.collectedAt));
+  const sameDatabase = a.bundle.target && b.bundle.target ? a.bundle.target === b.bundle.target : null;
+  const wh = { before: window(a.bundle), after: window(b.bundle) };
+  const limits = [];
+  if (sameDatabase === false) limits.push("These are two different databases, so nothing below is a before-and-after.");
+  if (statsReset) limits.push("The statistics were reset between the two checkups, so counters such as calls, scans and dead rows started over and are not comparable.");
+  if (wh.after !== null && wh.after < 1) limits.push(`The later checkup has only ${Math.round(wh.after * 60)} minutes of statistics behind it; usage-based findings need real traffic first.`);
+  limits.push("Two snapshots show what changed inside the database. They do not show that the application got faster: that needs query timings under comparable traffic, which pg-checkup observe measures on each side.");
+  return {
+    format: COMPARISON_FORMAT,
+    version: 1,
+    sameDatabase,
+    before: { collectedAt: a.bundle.collectedAt, server: a.bundle.server.version.split(" on ")[0].split(",")[0] },
+    after: { collectedAt: b.bundle.collectedAt, server: b.bundle.server.version.split(" on ")[0].split(",")[0] },
+    hoursBetween: hours(Date.parse(b.bundle.collectedAt) - Date.parse(a.bundle.collectedAt)),
+    windowHours: wh,
+    statsReset,
+    fixed,
+    new: added,
+    open,
+    unknown,
+    worse,
+    numbers,
+    tables,
+    regression: [...added, ...worse].some((f) => f.severity !== "info"),
+    limits
+  };
+}
+var fmtN2 = (n, kind) => {
+  if (n === null) return "\u2013";
+  if (kind === "bytes") {
+    const u = ["B", "KB", "MB", "GB", "TB"];
+    let i = 0, v = n;
+    while (v >= 1024 && i < u.length - 1) {
+      v /= 1024;
+      i++;
+    }
+    return `${v < 10 && i ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
+  }
+  if (kind === "pct") return `${Math.round(n * 10) / 10}%`;
+  if (kind === "secs") return n < 7200 ? `${Math.round(n / 60)} min` : n < 172800 ? `${Math.round(n / 3600)} h` : `${Math.round(n / 86400)} d`;
+  return Math.round(n).toLocaleString("en-US");
+};
+var when = (iso) => iso.replace("T", " ").slice(0, 16) + " UTC";
+var span2 = (h) => h < 1 ? `${Math.round(h * 60)} minutes` : h < 48 ? `${Math.round(h)} hours` : `${Math.round(h / 24)} days`;
+var windowText = (h) => h === null ? "unknown" : span2(h);
+function checkupComparisonText(c) {
+  const L = [];
+  L.push(`Before: ${when(c.before.collectedAt)}, ${c.before.server}.  After: ${when(c.after.collectedAt)}, ${c.after.server}.  ${span2(c.hoursBetween)} apart${c.sameDatabase === true ? ", same database" : c.sameDatabase === false ? ", DIFFERENT databases" : ""}.`);
+  L.push(`Statistics behind each: ${windowText(c.windowHours.before)} before, ${windowText(c.windowHours.after)} after${c.statsReset ? " (reset in between)" : ""}.`);
+  const group = (title, mark, items) => {
+    if (!items.length) return;
+    L.push("", `${title}  ${items.length}`);
+    for (const f of items) L.push(`${mark} ${f.title}  (${f.severity})`);
+  };
+  group("FIXED", "\u2713", c.fixed);
+  group("NEW", "!", c.new);
+  group("WORSE", "!", c.worse);
+  group("STILL OPEN", "\xB7", c.open.filter((f) => !c.worse.some((w2) => w2.id === f.id)));
+  group("UNKNOWN (the check did not run the second time)", "?", c.unknown);
+  if (!c.fixed.length && !c.new.length && !c.worse.length && !c.open.length) L.push("", "No findings in either checkup.");
+  const w = 28;
+  const line = (label, before, after, tail = "") => L.push(`${label.padEnd(w)}${before.padStart(12)}${after.padStart(12)}${tail ? "  " + tail : ""}`);
+  if (c.tables.length || c.numbers.length) {
+    L.push("", `${"NUMBERS".padEnd(w)}${"before".padStart(12)}${"after".padStart(12)}`);
+  }
+  for (const t of c.tables) {
+    const dir = moved(t.deadBefore, t.deadAfter) ? t.deadAfter < t.deadBefore ? "lower" : "higher" : "";
+    line(`Dead rows, ${t.table}`.slice(0, w - 1), fmtN2(t.deadBefore), fmtN2(t.deadAfter), dir);
+  }
+  for (const n of c.numbers) {
+    const changed = moved(n.before, n.after);
+    const dir = changed ? n.after < n.before ? "lower" : "higher" : "";
+    const verdict2 = changed && n.better ? dir === n.better ? "better" : "worse" : dir;
+    line(n.label.slice(0, w - 1), fmtN2(n.before, n.kind), fmtN2(n.after, n.kind), verdict2);
+  }
+  L.push("");
+  for (const l of c.limits) L.push(l);
+  return L.join("\n");
+}
 
 // src/cli-options.ts
 import { Command, CommanderError, InvalidArgumentError, Option } from "commander";
@@ -3942,7 +4065,7 @@ function buildProgram(version, record, quiet = false) {
   program.command("delete").description("remove an uploaded report").argument("<receipt>", "the receipt file written by upload").action((receipt, _o, cmd2) => done("delete", [receipt], cmd2));
   connection(program.command("baseline").description("save schema, security and settings before a migration")).action((conn, _o, cmd2) => done("baseline", conn ? [conn] : [], cmd2));
   connection(program.command("verify").description("explain what differs after the migration").argument("<baseline>", "file written by baseline").argument("[after]", "a second baseline file")).action((baseline, after, conn, cmd2) => done("verify", [baseline, ...after ? [after] : [], ...conn ? [conn] : []], cmd2));
-  program.command("compare").description("compare two observation files, or two baseline files").argument("<before>").argument("<after>").action((before, after, _o, cmd2) => done("compare", [before, after], cmd2));
+  program.command("compare").description("compare two checkup files (fixed, new, still open, the numbers), or two observation or baseline files").argument("<before>").argument("<after>").action((before, after, _o, cmd2) => done("compare", [before, after], cmd2));
   connection(program.command("observe").description("measure a window of real traffic from pg_stat_statements")).option("--seconds <n>", "length of the window", integer(10, 3600), "300").option("--label <label>", "name for the window, e.g. before-release-42").option("--representative", "attest that this is normal traffic with warm caches").action((conn, _o, cmd2) => done("observe", conn ? [conn] : [], cmd2));
   return program;
 }
@@ -4020,14 +4143,14 @@ function deltas(w) {
   const families = /* @__PURE__ */ new Map();
   for (const end of w.end.counters) {
     const start = before.get(end.key);
-    const calls = end.calls - (start?.calls ?? 0), ms = end.ms - (start?.ms ?? 0), rows = end.rows - (start?.rows ?? 0);
-    if (calls < 0 || ms < 0 || rows < 0 || start && (start.family !== end.family || start.since !== end.since)) {
+    const calls = end.calls - (start?.calls ?? 0), ms = end.ms - (start?.ms ?? 0), rows2 = end.rows - (start?.rows ?? 0);
+    if (calls < 0 || ms < 0 || rows2 < 0 || start && (start.family !== end.family || start.since !== end.since)) {
       reasons.push("A query counter reset or its representative text changed.");
       continue;
     }
     if (!calls) continue;
     const old = families.get(end.family) ?? { calls: 0, ms: 0, rows: 0 };
-    families.set(end.family, { calls: old.calls + calls, ms: old.ms + ms, rows: old.rows + rows });
+    families.set(end.family, { calls: old.calls + calls, ms: old.ms + ms, rows: old.rows + rows2 });
   }
   return { families, reasons };
 }
@@ -4259,10 +4382,11 @@ async function printReport(r, b, file) {
   }
   if (!b.session.monitor) out(dim(`${b.session.role} is not in pg_monitor, so other sessions' activity may be missing.`));
   if (file) {
-    const rows = b.datasets.reduce((n, d) => n + d.rows.length, 0);
+    const rows2 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
     out();
-    out(`Saved ${file}: ${rows} rows of statistics and catalog metadata, ${b.queryText === "removed" ? "no SQL text" : "SQL text with literals masked"}, no table data. Object and role names are in it; read it before sharing.`);
+    out(`Saved ${file}: ${rows2} rows of statistics and catalog metadata, ${b.queryText === "removed" ? "no SQL text" : "SQL text with literals masked"}, no table data. Object and role names are in it; read it before sharing.`);
     out(`  every row:                   pg-checkup show ${quote(file)} --all`);
+    out(`  did a fix work:              pg-checkup compare EARLIER.json ${quote(file)}`);
     out(`  shareable report, fix SQL:   pg-checkup upload ${quote(file)}   (sends this file to ${HOST}, nothing else)`);
   }
 }
@@ -4312,8 +4436,8 @@ async function upload(text, file) {
   validateDestination(SITE);
   const token = process.env.PGCHECKUP_TOKEN?.trim();
   const b = parseBundle(JSON.parse(text));
-  const rows = b.datasets.reduce((n, d) => n + d.rows.length, 0);
-  say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows} rows of statistics, ${b.queryText === "removed" ? "no SQL text" : "masked SQL text"}, no table data) to ${HOST}.`);
+  const rows2 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
+  say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows2} rows of statistics, ${b.queryText === "removed" ? "no SQL text" : "masked SQL text"}, no table data) to ${HOST}.`);
   say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). On the plan it is a full report with fix SQL, kept, and compared with your last checkup of this database.` : `You get the same findings as a shareable web page with the evidence tables. Kept 7 days under an unguessable link; anyone with the link can read it. "pg-checkup delete" removes it. Set PGCHECKUP_TOKEN (Settings on the site) to save it to your account.`);
   if (!await confirm("Upload? [y/N] ")) {
     say("Not uploaded.");
@@ -4491,6 +4615,14 @@ Every row: pg-checkup show ${quote(positionals[0])} --all`));
   if (cmd === "compare" || cmd === "verify") {
     const before = load(positionals[0]).value;
     const second = positionals.slice(1).find((s) => !/^postgres(ql)?:\/\//.test(s));
+    if (before.format === BUNDLE_FORMAT) {
+      const [x, y] = [parseBundle(before), parseBundle(load(second).value)];
+      const [rx, ry] = [await analyze(x, { provider: provider2 }), await analyze(y, { provider: provider2 })];
+      const c = compareCheckups({ bundle: x, findings: rx.findings, checks: rx.checks, vitals: rx.vitals }, { bundle: y, findings: ry.findings, checks: ry.checks, vitals: ry.vitals });
+      if (flag("json")) process.stdout.write(json(c));
+      else out(checkupComparisonText(c));
+      return c.sameDatabase === false ? 4 : c.regression ? 1 : 0;
+    }
     if (before.format === WINDOW_FORMAT) {
       const result = compareWorkloads(parseWindow(before), parseWindow(load(second).value));
       if (flag("json")) process.stdout.write(json(result));

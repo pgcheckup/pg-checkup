@@ -16,6 +16,7 @@
     "source/src/sections.ts",
     "source/src/report.ts",
     "source/src/snapshot.ts",
+    "source/src/checkup-compare.ts",
     "source/src/cli-options.ts",
     "source/src/workload.ts",
     "source/src/collector-cli.ts",

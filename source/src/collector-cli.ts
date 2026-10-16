@@ -14,7 +14,8 @@ import type { Finding, Severity } from './types.js';
 import { requireMonitoringRole, roleProblems, roleSql, roleInfo, RoleRefused, MONITOR_ROLE_SQL } from './role.js';
 import { profileFor, providerIdFromUrl } from './provider.js';
 import { takeSnapshot, diffSnapshots, diffText, SNAPSHOT_FORMAT, type Snapshot } from './snapshot.js';
-import { parseBundle, MAX_BUNDLE_BYTES, type Bundle } from './bundle.js';
+import { parseBundle, MAX_BUNDLE_BYTES, BUNDLE_FORMAT, type Bundle } from './bundle.js';
+import { compareCheckups, checkupComparisonText } from './checkup-compare.js';
 import { buildProgram, normalizeArgv, terminalText, UsageError as OptionError, type Parsed } from './cli-options.js';
 import { CommanderError } from 'commander';
 import { observe, parseWindow, compareWorkloads, workloadText, WINDOW_FORMAT, WORKLOAD_SQL, WINDOW_META_SQL } from './workload.js';
@@ -186,6 +187,7 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
     out();
     out(`Saved ${file}: ${rows} rows of statistics and catalog metadata, ${b.queryText === 'removed' ? 'no SQL text' : 'SQL text with literals masked'}, no table data. Object and role names are in it; read it before sharing.`);
     out(`  every row:                   pg-checkup show ${quote(file)} --all`);
+    out(`  did a fix work:              pg-checkup compare EARLIER.json ${quote(file)}`);
     out(`  shareable report, fix SQL:   pg-checkup upload ${quote(file)}   (sends this file to ${HOST}, nothing else)`);
   }
 }
@@ -360,6 +362,14 @@ async function main(): Promise<number> {
   if (cmd === 'compare' || cmd === 'verify') {
     const before = load(positionals[0]).value;
     const second = positionals.slice(1).find((s) => !/^postgres(ql)?:\/\//.test(s));
+    if (before.format === BUNDLE_FORMAT) {
+      // Two checkup files: what was fixed, what is new, and the numbers. Both are analysed here, so older files work.
+      const [x, y] = [parseBundle(before), parseBundle(load(second).value)];
+      const [rx, ry] = [await analyze(x, { provider }), await analyze(y, { provider })];
+      const c = compareCheckups({ bundle: x, findings: rx.findings, checks: rx.checks, vitals: rx.vitals }, { bundle: y, findings: ry.findings, checks: ry.checks, vitals: ry.vitals });
+      if (flag('json')) process.stdout.write(json(c)); else out(checkupComparisonText(c));
+      return c.sameDatabase === false ? 4 : c.regression ? 1 : 0;
+    }
     if (before.format === WINDOW_FORMAT) {
       const result = compareWorkloads(parseWindow(before), parseWindow(load(second).value));
       if (flag('json')) process.stdout.write(json(result)); else out(workloadText(result));

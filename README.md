@@ -79,6 +79,18 @@ The saved file holds statistics, settings, and schema and role names. It never h
 
 Every query the checkup runs is printed by `pg-checkup sql`. Everything that touches the database or the network ships as readable TypeScript under `source/`, listed in `source-manifest.json`; the checks and triage ship compiled in `dist/`. Source: https://github.com/pgcheckup/pg-checkup
 
+## Did the fix work?
+
+Run the checkup again after the change and compare the two files:
+
+```
+pg-checkup compare before.json after.json
+```
+
+It lists what was fixed (the check now passes), what is new, what is still open, and the numbers side by side: dead rows per table named in a finding, database size, cache hit rate, connections. It says how much statistics each checkup had behind it and whether they were reset in between. Exit 1 when a new or worsened warning or critical finding appears, 4 when the files are from different databases.
+
+Two snapshots show what changed inside the database; they do not show that the application got faster. For that, measure query timings under comparable traffic with `observe` on each side, below.
+
 ## Before and after a migration
 
 ```

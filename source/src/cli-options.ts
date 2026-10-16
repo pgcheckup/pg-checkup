@@ -119,7 +119,7 @@ export function buildProgram(version: string, record: (p: Parsed) => void, quiet
     .action((conn: string | undefined, _o, cmd: Command) => done('baseline', conn ? [conn] : [], cmd));
   connection(program.command('verify').description('explain what differs after the migration').argument('<baseline>', 'file written by baseline').argument('[after]', 'a second baseline file'))
     .action((baseline: string, after: string | undefined, conn: string | undefined, cmd: Command) => done('verify', [baseline, ...(after ? [after] : []), ...(conn ? [conn] : [])], cmd));
-  program.command('compare').description('compare two observation files, or two baseline files').argument('<before>').argument('<after>')
+  program.command('compare').description('compare two checkup files (fixed, new, still open, the numbers), or two observation or baseline files').argument('<before>').argument('<after>')
     .action((before: string, after: string, _o, cmd: Command) => done('compare', [before, after], cmd));
   connection(program.command('observe').description('measure a window of real traffic from pg_stat_statements'))
     .option('--seconds <n>', 'length of the window', integer(10, 3600), '300')
