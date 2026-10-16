@@ -3420,15 +3420,16 @@ var QUERY_FINDINGS = ["queries.dominant", "queries.slow_average"];
 var CAPACITY = ["capacity.cpu_bound", "capacity.working_set", "capacity.io_wait", "capacity.read_replica"];
 var HORIZON_MIN = 1e5;
 function triage(input, datasets, vitals = []) {
-  const fs = input.map(({ priority: _p, cause: _c, note: _n, ...f }) => ({ ...f, priority: DEFAULT[f.severity] ?? "watch" }));
+  const fs = input.map(({ priority: _p, cause: _c, note: _n, confidence: _k, ...f }) => ({ ...f, priority: DEFAULT[f.severity] ?? "watch" }));
   const by = (id) => fs.find((f) => f.id === id);
   const rows2 = (id) => datasets.find((d) => d.id === id)?.rows ?? [];
   const notes = /* @__PURE__ */ new Map();
   const note = (f, s) => notes.set(f.id, [...notes.get(f.id) ?? [], s]);
   const rank = (p) => PRIORITIES.indexOf(p);
-  const link = (cause, effect) => {
+  const link = (cause, effect, confidence = "demonstrated") => {
     if (cause === effect || effect.cause) return;
     effect.cause = cause.id;
+    effect.confidence = confidence;
     if (rank(cause.priority) > rank(effect.priority)) cause.priority = effect.priority;
   };
   const deadPct = new Map(rows2("v_dead").map((r) => [String(r.table), num5(r.dead_pct)]));
@@ -3472,7 +3473,7 @@ function triage(input, datasets, vitals = []) {
   if (seq) for (const t of tablesIn(seq)) {
     const r = reason(t, false);
     if (r) {
-      link(r.cause, seq);
+      link(r.cause, seq, "likely");
       note(seq, r.text);
       break;
     }
@@ -3483,7 +3484,7 @@ function triage(input, datasets, vitals = []) {
     const t = [...deadTables, ...staleTables].find((x) => sql.some((s) => mentions(s, x)));
     const r = t ? reason(t, true) : null;
     if (r) {
-      link(r.cause, q);
+      link(r.cause, q, "likely");
       note(q, r.text);
     }
   }
@@ -3520,7 +3521,7 @@ function triage(input, datasets, vitals = []) {
     const ioCause = c.id === "capacity.io_wait" ? by("tables.bloat") ?? dead : void 0;
     const cause = ioCause ?? culprit;
     if (!cause) continue;
-    link(cause, c);
+    link(cause, c, "likely");
     note(c, `Before adding CPU or memory: ${lc(cause.title)}. A larger instance would run the same plans, so fix that first and measure again.`);
   }
   const spillQ = by("queries.temp_spill");
@@ -3973,7 +3974,7 @@ function checkupComparisonText(c) {
     line(`Dead rows, ${t.table}`.slice(0, w - 1), fmtN2(t.deadBefore), fmtN2(t.deadAfter), dir);
   }
   for (const n of c.numbers) {
-    const changed = moved(n.before, n.after);
+    const changed = moved(n.before, n.after) && fmtN2(n.before, n.kind) !== fmtN2(n.after, n.kind);
     const dir = changed ? n.after < n.before ? "lower" : "higher" : "";
     const verdict2 = changed && n.better ? dir === n.better ? "better" : "worse" : dir;
     line(n.label.slice(0, w - 1), fmtN2(n.before, n.kind), fmtN2(n.after, n.kind), verdict2);
@@ -4355,6 +4356,9 @@ async function printReport(r, b, file) {
   const sev = SEV_RANK.map((x) => count(x)).some(Boolean) ? SEV_RANK.filter((x) => count(x)).map((x) => ink(SEV_INK[x], `${count(x)} ${x}`)).join(dim(" \xB7 ")) : ink(32, "nothing flagged");
   out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ""}  ${dim(`${active.length} checks:`)} ${sev}`);
   const step = Math.min(450, Math.round(5e3 / Math.max(findings.length, 1)));
+  if (findings.length > 1) out(`${dim("Start here:")} ${findings[0].title}`);
+  const limited = evidenceWindowHours(b);
+  if (limited !== null && limited < 1) out(ink(33, `Statistics cover only ${plural(Math.max(1, Math.round(limited * 60)), "minute")}. Findings about queries, scans and unused indexes need real traffic; run again after the database has been busy.`));
   await pause(step);
   for (const p of PRIORITIES) {
     const group = findings.filter((f) => (f.priority ?? "watch") === p);
@@ -4364,7 +4368,7 @@ async function printReport(r, b, file) {
     out(rule());
     for (const f of group) {
       out(`${SEV_MARK[f.severity]} ${bold(f.title)}  ${dim(f.category)}`);
-      if (f.note) para(f.note);
+      if (f.note) para(f.cause ? `${f.confidence === "likely" ? "Likely, from the findings together: " : "Shown by the statistics: "}${f.note}` : f.note);
       para(`${dim("Why:")} ${f.why}`);
       para(`${dim("Fix:")} ${f.fix}`);
       await pause(step);
@@ -4389,6 +4393,13 @@ async function printReport(r, b, file) {
     out(`  did a fix work:              pg-checkup compare EARLIER.json ${quote(file)}`);
     out(`  shareable report, fix SQL:   pg-checkup upload ${quote(file)}   (sends this file to ${HOST}, nothing else)`);
   }
+}
+function evidenceWindowHours(b) {
+  const at = Date.parse(b.collectedAt);
+  const reset = b.datasets.find((d) => d.id === "l_db")?.rows[0]?.stats_reset;
+  if (reset && Date.parse(String(reset))) return (at - Date.parse(String(reset))) / 36e5;
+  const up = Number(b.vitals?.uptime_s);
+  return Number.isFinite(up) && up > 0 ? up / 3600 : null;
 }
 var fails = (findings) => {
   const at = opt("fail-on");

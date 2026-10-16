@@ -22,6 +22,8 @@ export interface Finding {
   priority?: Priority;
   /** Set by triage(): the id of the finding that causes this one, when another finding explains it. */
   cause?: string;
+  /** Set with `cause`: "demonstrated" when the statistics show the link (a session holding back vacuum, a blocking pid), "likely" when it is reasoning from the findings. */
+  confidence?: "demonstrated" | "likely";
   /** Set by triage(): one sentence relating this finding to the others, in database terms. */
   note?: string;
 }

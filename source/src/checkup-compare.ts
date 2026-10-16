@@ -125,7 +125,7 @@ export function checkupComparisonText(c: CheckupComparison): string {
     line(`Dead rows, ${t.table}`.slice(0, w - 1), fmtN(t.deadBefore), fmtN(t.deadAfter), dir);
   }
   for (const n of c.numbers) {
-    const changed = moved(n.before, n.after);
+    const changed = moved(n.before, n.after) && fmtN(n.before, n.kind) !== fmtN(n.after, n.kind);
     const dir = changed ? (n.after! < n.before! ? "lower" : "higher") : "";
     const verdict = changed && n.better ? (dir === n.better ? "better" : "worse") : dir;
     line(n.label.slice(0, w - 1), fmtN(n.before, n.kind), fmtN(n.after, n.kind), verdict);

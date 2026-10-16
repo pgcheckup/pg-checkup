@@ -158,6 +158,9 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
   out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ''}  ${dim(`${active.length} checks:`)} ${sev}`);
   // Enough time to read each finding, but never more than about five seconds in total.
   const step = Math.min(450, Math.round(5000 / Math.max(findings.length, 1)));
+  if (findings.length > 1) out(`${dim('Start here:')} ${findings[0].title}`);
+  const limited = evidenceWindowHours(b);
+  if (limited !== null && limited < 1) out(ink(33, `Statistics cover only ${plural(Math.max(1, Math.round(limited * 60)), 'minute')}. Findings about queries, scans and unused indexes need real traffic; run again after the database has been busy.`));
   await pause(step);
   for (const p of PRIORITIES) {
     const group = findings.filter((f) => (f.priority ?? 'watch') === p);
@@ -165,7 +168,7 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
     out(); out(`${ink(GROUP_INK[p], bold(PRIORITY_LABEL[p].toUpperCase()))}  ${dim(`${group.length}`)}`); out(rule());
     for (const f of group) {
       out(`${SEV_MARK[f.severity]} ${bold(f.title)}  ${dim(f.category)}`);
-      if (f.note) para(f.note);
+      if (f.note) para(f.cause ? `${f.confidence === 'likely' ? 'Likely, from the findings together: ' : 'Shown by the statistics: '}${f.note}` : f.note);
       para(`${dim('Why:')} ${f.why}`);
       para(`${dim('Fix:')} ${f.fix}`);
       await pause(step);
@@ -190,6 +193,14 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
     out(`  did a fix work:              pg-checkup compare EARLIER.json ${quote(file)}`);
     out(`  shareable report, fix SQL:   pg-checkup upload ${quote(file)}   (sends this file to ${HOST}, nothing else)`);
   }
+}
+/** Hours of statistics behind the checkup: since the stats reset, or since the server started. Null when unknown. */
+function evidenceWindowHours(b: Bundle): number | null {
+  const at = Date.parse(b.collectedAt);
+  const reset = b.datasets.find((d) => d.id === 'l_db')?.rows[0]?.stats_reset;
+  if (reset && Date.parse(String(reset))) return (at - Date.parse(String(reset))) / 36e5;
+  const up = Number(b.vitals?.uptime_s);
+  return Number.isFinite(up) && up > 0 ? up / 3600 : null;
 }
 /** Whether any finding is at or above the --fail-on severity. */
 const fails = (findings: Finding[]) => { const at = opt('fail-on'); return at ? findings.some((f) => SEV_RANK.indexOf(f.severity) <= SEV_RANK.indexOf(at as Severity)) : false; };
