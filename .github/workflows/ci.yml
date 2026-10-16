@@ -59,7 +59,8 @@ jobs:
 
       - name: Every diagnostic view readable as the server's own superuser (--strict)
         env: { PGPASSWORD: admin }
-        run: node dist/pg-checkup.js -h 127.0.0.1 -U postgres -d postgres --strict --no-pace --no-color -o su.json > /dev/null
+        run: |
+          node dist/pg-checkup.js -h 127.0.0.1 -U postgres -d postgres --strict --no-pace --no-color -o su.json > /dev/null
 
       - name: A privileged login on a remote host is refused (0.0.0.0 reaches the same server but is not localhost)
         env: { PGPASSWORD: admin }
@@ -96,4 +97,6 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 18 }
       - run: npm install --no-audit --no-fund
-      - run: node dist/pg-checkup.js --help | grep -q "Usage: pg-checkup" && node dist/pg-checkup.js sql | grep -q pg_stat_activity
+      - run: |
+          node dist/pg-checkup.js --help | grep -q "Usage: pg-checkup"
+          node dist/pg-checkup.js sql | grep -q pg_stat_activity
