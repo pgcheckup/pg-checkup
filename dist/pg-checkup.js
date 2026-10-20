@@ -1498,6 +1498,7 @@ function normalize(rows3, cols) {
 var ALL_DEFS = [...DEFS, ...MORE, ...CAP, ...OPS];
 async function collectDatasets(c, onRead) {
   const installed = new Set((await c.q(`select extname from pg_extension`)).map((r) => String(r.extname)));
+  c.role ??= String((await c.q(`select current_user as u`).catch(() => [{ u: void 0 }]))[0]?.u ?? "") || void 0;
   const out2 = [];
   let done = 0;
   for (const d of ALL_DEFS) {
@@ -1515,7 +1516,9 @@ async function collectDatasets(c, onRead) {
       out2.push({ ...base2, rows: rows3, capped: rows3.length >= (d.limit ?? 50) });
     } catch (e) {
       if (isConnectionLost(e)) throw e;
-      out2.push({ ...base2, error: String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]") });
+      const msg = String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]");
+      const denied = /permission denied for schema (\S+)/.exec(msg);
+      out2.push({ ...base2, error: denied ? `The login cannot use schema "${denied[1]}", where ${d.ext ?? "this view"} lives. As an admin: grant usage on schema ${denied[1]} to ${c.role ?? "your checkup login"};` : msg });
     }
   }
   return out2;
@@ -1699,6 +1702,8 @@ function requireMonitoringRole(role, allowPrivilegedRole2 = false) {
 }
 var MONITOR_ROLE_SQL = `create role checkup_reader login password 'choose-a-password';
 grant pg_monitor to checkup_reader;
+-- Some hosts keep extensions in their own schema (Supabase: "extensions"). This grants usage only if that schema exists.
+do $$ begin if exists (select 1 from pg_namespace where nspname = 'extensions') then execute 'grant usage on schema extensions to checkup_reader'; end if; end $$;
 -- Nothing else: no table grants, no superuser, no BYPASSRLS, no REPLICATION.`;
 
 // src/fingerprint.ts
@@ -4876,9 +4881,15 @@ ${WORKLOAD_SQL};`);
       out(`${problems.length ? local ? ink(33, "!") : ink(31, "\u2717") : ink(32, "\u2713")} Login ${role.role}: ${role.monitor ? "in pg_monitor" : "not in pg_monitor (other sessions may be hidden)"}${problems.length ? "" : ", statistics only"}`);
       for (const p of problems) out(`    - ${p}`);
       if (problems.length) out(`    ${local ? "Accepted for a local database." : "A checkup of a remote database stops here. Create a statistics-only login: pg-checkup role"}`);
-      const ext = (await db.query(`select extname from pg_extension`)).rows.map((r) => r.extname);
-      out(`${ext.includes("pg_stat_statements") ? ink(32, "\u2713") : ink(33, "!")} pg_stat_statements ${ext.includes("pg_stat_statements") ? "installed" : "not installed: query checks will be skipped"}`);
-      out(`${ext.includes("pgstattuple") ? ink(32, "\u2713") : ink(2, "-")} pgstattuple ${ext.includes("pgstattuple") ? "installed" : "not installed: bloat is estimated, not measured"}`);
+      const exts = (await db.query(`select e.extname::text as name, n.nspname::text as schema, has_schema_privilege(n.nspname, 'USAGE') as usable from pg_extension e join pg_namespace n on n.oid = e.extnamespace`)).rows;
+      const extLine = (name, missing, mark = 33) => {
+        const e = exts.find((x) => x.name === name);
+        if (!e) return out(`${ink(mark, mark === 33 ? "!" : "-")} ${name} not installed: ${missing}`);
+        if (!e.usable) return out(`${ink(31, "\u2717")} ${name} is installed in schema "${e.schema}", which this login cannot use. As an admin: grant usage on schema ${e.schema} to ${role.role};`);
+        out(`${ink(32, "\u2713")} ${name} installed${e.schema !== "public" ? ` (schema "${e.schema}")` : ""}`);
+      };
+      extLine("pg_stat_statements", "query checks will be skipped");
+      extLine("pgstattuple", "bloat is estimated, not measured", 2);
       return problems.length && !local ? 3 : 0;
     } finally {
       await db.end();

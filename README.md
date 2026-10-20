@@ -49,6 +49,8 @@ Use a login that can read statistics and nothing else (`pg-checkup role` prints 
 ```sql
 create role checkup_reader login password '...';
 grant pg_monitor to checkup_reader;
+-- Some hosts keep extensions in their own schema (Supabase: "extensions"). This grants usage only if that schema exists.
+do $$ begin if exists (select 1 from pg_namespace where nspname = 'extensions') then execute 'grant usage on schema extensions to checkup_reader'; end if; end $$;
 ```
 
 On a remote database, a login with more access than that is refused. Remote connections need TLS with a verified certificate; for a provider with its own CA, set `PGSSLROOTCERT=ca.pem`.

@@ -60,4 +60,6 @@ export function requireMonitoringRole(role: RoleInfo, allowPrivilegedRole = fals
 /** The role the collector asks for: statistics only, no table data, no writes. Matches sql/create-monitor-role.sql. */
 export const MONITOR_ROLE_SQL = `create role checkup_reader login password 'choose-a-password';
 grant pg_monitor to checkup_reader;
+-- Some hosts keep extensions in their own schema (Supabase: "extensions"). This grants usage only if that schema exists.
+do $$ begin if exists (select 1 from pg_namespace where nspname = 'extensions') then execute 'grant usage on schema extensions to checkup_reader'; end if; end $$;
 -- Nothing else: no table grants, no superuser, no BYPASSRLS, no REPLICATION.`;

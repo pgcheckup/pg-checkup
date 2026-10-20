@@ -52,6 +52,8 @@ export interface Ctx extends AnalysisCtx {
   db: Client;
   /** Sessions and pid of the scanner itself. */
   selfPid: number;
+  /** The connected role, once known. */
+  role?: string;
   q: <T = Record<string, any>>(sql: string, params?: unknown[]) => Promise<T[]>;
 }
 

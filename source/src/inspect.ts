@@ -363,6 +363,7 @@ export const ALL_DEFS: Def[] = [...DEFS, ...MORE, ...CAP, ...OPS];
 
 export async function collectDatasets(c: Ctx, onRead?: (done: number, total: number) => void): Promise<Dataset[]> {
   const installed = new Set((await c.q(`select extname from pg_extension`)).map((r) => String(r.extname)));
+  c.role ??= String((await c.q(`select current_user as u`).catch(() => [{ u: undefined }]))[0]?.u ?? "") || undefined;
   const out: Dataset[] = [];
   let done = 0;
   for (const d of ALL_DEFS) {
@@ -377,7 +378,9 @@ export async function collectDatasets(c: Ctx, onRead?: (done: number, total: num
       out.push({ ...base, rows, capped: rows.length >= (d.limit ?? 50) });
     } catch (e: any) {
       if (isConnectionLost(e)) throw e; // the connection is gone: fail the scan instead of reporting a hollow result
-      out.push({ ...base, error: String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]") });
+      const msg = String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]");
+      const denied = /permission denied for schema (\S+)/.exec(msg);
+      out.push({ ...base, error: denied ? `The login cannot use schema "${denied[1]}", where ${d.ext ?? "this view"} lives. As an admin: grant usage on schema ${denied[1]} to ${c.role ?? "your checkup login"};` : msg });
     }
   }
   return out;

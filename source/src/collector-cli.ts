@@ -335,9 +335,15 @@ async function main(): Promise<number> {
       out(`${problems.length ? (local ? ink(33, '!') : ink(31, '✗')) : ink(32, '✓')} Login ${role.role}: ${role.monitor ? 'in pg_monitor' : 'not in pg_monitor (other sessions may be hidden)'}${problems.length ? '' : ', statistics only'}`);
       for (const p of problems) out(`    - ${p}`);
       if (problems.length) out(`    ${local ? 'Accepted for a local database.' : 'A checkup of a remote database stops here. Create a statistics-only login: pg-checkup role'}`);
-      const ext = (await db.query(`select extname from pg_extension`)).rows.map((r) => r.extname);
-      out(`${ext.includes('pg_stat_statements') ? ink(32, '✓') : ink(33, '!')} pg_stat_statements ${ext.includes('pg_stat_statements') ? 'installed' : 'not installed: query checks will be skipped'}`);
-      out(`${ext.includes('pgstattuple') ? ink(32, '✓') : ink(2, '-')} pgstattuple ${ext.includes('pgstattuple') ? 'installed' : 'not installed: bloat is estimated, not measured'}`);
+      const exts = (await db.query(`select e.extname::text as name, n.nspname::text as schema, has_schema_privilege(n.nspname, 'USAGE') as usable from pg_extension e join pg_namespace n on n.oid = e.extnamespace`)).rows as { name: string; schema: string; usable: boolean }[];
+      const extLine = (name: string, missing: string, mark = 33) => {
+        const e = exts.find((x) => x.name === name);
+        if (!e) return out(`${ink(mark, mark === 33 ? '!' : '-')} ${name} not installed: ${missing}`);
+        if (!e.usable) return out(`${ink(31, '✗')} ${name} is installed in schema "${e.schema}", which this login cannot use. As an admin: grant usage on schema ${e.schema} to ${role.role};`);
+        out(`${ink(32, '✓')} ${name} installed${e.schema !== 'public' ? ` (schema "${e.schema}")` : ''}`);
+      };
+      extLine('pg_stat_statements', 'query checks will be skipped');
+      extLine('pgstattuple', 'bloat is estimated, not measured', 2);
       return problems.length && !local ? 3 : 0;
     } finally { await db.end(); }
   }
