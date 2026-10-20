@@ -20,7 +20,7 @@ import { buildProgram, normalizeArgv, terminalText, UsageError as OptionError, t
 import { CommanderError } from 'commander';
 import { observe, parseWindow, compareWorkloads, workloadText, WINDOW_FORMAT, WORKLOAD_SQL, WINDOW_META_SQL } from './workload.js';
 import type { ProviderId } from './provider.js';
-import { githubWorkflow, crontabLine, SCHEDULE_NOTES, type Every } from './schedule.js';
+import { githubWorkflow, githubSummaryWorkflow, crontabLine, SCHEDULE_NOTES, type Every } from './schedule.js';
 
 // Commander prints help and usage errors itself; a usage error exits 2, help and --version exit 0.
 const parsed: Parsed = (() => {
@@ -248,7 +248,7 @@ async function upload(text: string, file: string) {
   say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows} rows of statistics, ${b.queryText === 'removed' ? 'no SQL text' : 'masked SQL text'}, no table data) to ${HOST}.`);
   const code = opt('send');
   if (code !== undefined && !/^[a-f0-9]{32}$/.test(code)) throw new Error('--send needs the code shown on pgcheckup.com/scan. Copy the whole command from the page.');
-  say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). On the plan it is a full report with fix SQL, kept, and compared with your last checkup of this database.` : `You get the same findings as a shareable web page with the evidence tables. Kept 7 days under an unguessable link; anyone with the link can read it. "pg-checkup delete" removes it. Set PGCHECKUP_TOKEN (Settings on the site) to save it to your account.`);
+  say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). With Workspace it is a full report: SQL to review, compared with your last checkup of this database, PDF and a share link.` : `You get the findings, why and fix as a web page that only you can open, kept 7 days. "pg-checkup delete" removes it. Workspace adds the SQL to review, comparison after a fix, PDF and a share link.`);
   if (code) say('Sending it because you passed --send; the page that showed the code opens the report.');
   else if (!await confirm('Upload? [y/N] ')) { say('Not uploaded.'); return; }
   say(`Uploading…`);
@@ -260,6 +260,7 @@ async function upload(text: string, file: string) {
   writeFileSync(receipt, json({ report: r.url, id: r.id, deleteKey: r.key, sha256: sha(text), uploadedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
   if (r.sha256 !== sha(text)) throw new Error(`The server's hash does not match your file. Treat the upload as unverified: pg-checkup delete ${quote(receipt)} removes it.`);
   const report = new URL(r.url);
+  if (!r.full) report.hash = `k=${r.key}`; // a free report is private: the key in the fragment lets this browser open it
   if (flag('json')) out(json({ report: String(report), receipt, sha256: r.sha256, ...(r.account ? { account: r.account, full: Boolean(r.full) } : {}) }));
   else {
     out(`Report:  ${report}`);
@@ -305,7 +306,7 @@ async function main(): Promise<number> {
   if (cmd === 'schedule') {
     const every = (opt('every') === 'daily' ? 'daily' : 'weekly') as Every;
     if (flag('cron')) { out(crontabLine(every)); for (const n of SCHEDULE_NOTES('cron')) say(n); return 0; }
-    const yaml = githubWorkflow(every);
+    const yaml = flag('summary') ? githubSummaryWorkflow(every, opt('fail-on')) : githubWorkflow(every);
     if (flag('write')) {
       const path = '.github/workflows/pg-checkup.yml';
       if (existsSync(path)) throw new Error(`${path} already exists; it was not changed.`);
@@ -313,7 +314,7 @@ async function main(): Promise<number> {
       writeFileSync(path, yaml, { flag: 'wx' });
       say(`Wrote ${path}. Add the two secrets it lists, commit it, and run it once from the Actions tab.`);
     } else out(yaml);
-    for (const n of SCHEDULE_NOTES('github')) say(n);
+    for (const n of SCHEDULE_NOTES(flag('summary') ? 'summary' : 'github')) say(n);
     return 0;
   }
   if (cmd === 'sql') {

@@ -1,4 +1,4 @@
-import { type Def, C, us, ut, inDb, pgss, setting, maskSql, SETTING_COLS } from "./dsutil.js";
+import { type Def, C, us, ut, inDb, pgss, extq, setting, maskSql, SETTING_COLS } from "./dsutil.js";
 
 /** Additional datasets: schema integrity, stale stats, bloat, redundant indexes, security surface, version and I/O. */
 export const MORE: Def[] = [
@@ -6,7 +6,7 @@ export const MORE: Def[] = [
   { id: "q_pgss", section: "queries", title: "Statement tracking health", source: "pg_stat_statements_info", layout: "kv", limit: 1, ext: "pg_stat_statements", minPg: 140000,
     description: "How many statements were evicted from the tracking table. Evictions mean pg_stat_statements.max is too small and history is being lost.",
     columns: [C("dealloc", "Statements evicted", "int", { warn: 1 }), C("stats_reset", "Since", "ts")],
-    sql: () => `select dealloc, stats_reset from pg_stat_statements_info` },
+    sql: (c) => `select dealloc, stats_reset from ${extq(c, "pg_stat_statements_info", "pg_stat_statements")}` },
 
   // ───────── Tables
   { id: "t_stale", section: "tables", title: "Stale planner statistics", source: "pg_stat_user_tables", limit: 25,
@@ -21,7 +21,7 @@ export const MORE: Def[] = [
     columns: [C("table", "Table", "mono"), C("bytes", "Size", "bytes"), C("dead_pct", "Dead", "pct"), C("free_pct", "Free space", "pct"), C("bloat_pct", "Bloat", "pct", { warn: 30, bad: 60 }), C("wasted_bytes", "Wasted", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", pg_relation_size(t.oid) as bytes, round(a.dead_tuple_percent::numeric, 1) as dead_pct, round(a.approx_free_percent::numeric, 1) as free_pct,
       round((a.dead_tuple_percent + a.approx_free_percent)::numeric, 1) as bloat_pct, (a.dead_tuple_len + a.approx_free_space)::bigint as wasted_bytes
-      from pg_class t join pg_namespace n on n.oid = t.relnamespace, lateral pgstattuple_approx(t.oid) a
+      from pg_class t join pg_namespace n on n.oid = t.relnamespace, lateral ${extq(c, "pgstattuple_approx", "pgstattuple")}(t.oid) a
       where t.relkind = 'r' and ${ut(c, "n.nspname", "t.relname")} and pg_relation_size(t.oid) > 8 * 1024 * 1024 order by pg_relation_size(t.oid) desc limit 15` },
 
   // ───────── Vacuum

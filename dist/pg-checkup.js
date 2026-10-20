@@ -289,7 +289,11 @@ var us = (c, col) => userSchemaSql(c.profile, col);
 var ut = (c, schemaCol, tableCol) => userTableSql(c.profile, schemaCol, tableCol);
 var TOOLING_SQL = String.raw`(pg_catalog\.|information_schema\.|\mpg_(timezone_names|available_extensions|extension|namespace|class|proc|policy|policies|type|attribute|attrdef|constraint|index|indexes|roles|authid|auth_members|database|settings|stat_|statio_|description|depend|trigger|rewrite|enum|inherits|tables|views|sequences|locks|replication_slots)\M)`;
 var inDb = "(select oid from pg_database where datname = current_database())";
-var pgss = (c) => `from pg_stat_statements s join pg_roles r on r.oid = s.userid
+var extq = (c, name, ext = name) => {
+  const s = c.facts?.extSchemas?.[ext];
+  return s ? `"${s.replace(/"/g, '""')}".${name}` : name;
+};
+var pgss = (c) => `from ${extq(c, "pg_stat_statements")} s join pg_roles r on r.oid = s.userid
   where s.dbid = ${inDb} and not ${c.profile.managedRoleSql("r.rolname")} and s.query !~* '${TOOLING_SQL}' and s.query not like '%/* pg-checkup */%'`;
 var SECRET_NAME = String.raw`(pass|secret|token|conninfo|credential|api_?key|private|_command$|(^|[._])key($|[._]))`;
 var safeValue = (col = "setting", name = "name") => `case when ${name} ~* '${SECRET_NAME}' or ${col} ~ '://|host=' then '(hidden)' else ${col} end`;
@@ -319,7 +323,7 @@ var MORE = [
     minPg: 14e4,
     description: "How many statements were evicted from the tracking table. Evictions mean pg_stat_statements.max is too small and history is being lost.",
     columns: [C("dealloc", "Statements evicted", "int", { warn: 1 }), C("stats_reset", "Since", "ts")],
-    sql: () => `select dealloc, stats_reset from pg_stat_statements_info`
+    sql: (c) => `select dealloc, stats_reset from ${extq(c, "pg_stat_statements_info", "pg_stat_statements")}`
   },
   // ───────── Tables
   {
@@ -346,7 +350,7 @@ var MORE = [
     columns: [C("table", "Table", "mono"), C("bytes", "Size", "bytes"), C("dead_pct", "Dead", "pct"), C("free_pct", "Free space", "pct"), C("bloat_pct", "Bloat", "pct", { warn: 30, bad: 60 }), C("wasted_bytes", "Wasted", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", pg_relation_size(t.oid) as bytes, round(a.dead_tuple_percent::numeric, 1) as dead_pct, round(a.approx_free_percent::numeric, 1) as free_pct,
       round((a.dead_tuple_percent + a.approx_free_percent)::numeric, 1) as bloat_pct, (a.dead_tuple_len + a.approx_free_space)::bigint as wasted_bytes
-      from pg_class t join pg_namespace n on n.oid = t.relnamespace, lateral pgstattuple_approx(t.oid) a
+      from pg_class t join pg_namespace n on n.oid = t.relnamespace, lateral ${extq(c, "pgstattuple_approx", "pgstattuple")}(t.oid) a
       where t.relkind = 'r' and ${ut(c, "n.nspname", "t.relname")} and pg_relation_size(t.oid) > 8 * 1024 * 1024 order by pg_relation_size(t.oid) desc limit 15`
   },
   // ───────── Vacuum
@@ -1709,7 +1713,7 @@ function fingerprint(connectionString) {
 
 // src/collect.ts
 var TAG = "/* pg-checkup */";
-var COLLECTOR_VERSION = "0.3.0";
+var COLLECTOR_VERSION = "0.3.1";
 var LOCAL = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 var isLocalHost = (connectionString) => {
   try {
@@ -1759,6 +1763,7 @@ async function openReadOnlySession(connectionString, address) {
   return { db, tls, verified, local };
 }
 var VERSION_SQL = `select current_setting('server_version_num')::int as v, version() as s, pg_backend_pid() as pid`;
+var EXT_SCHEMA_SQL = `select e.extname::text as extname, n.nspname::text as nspname from pg_extension e join pg_namespace n on n.oid = e.extnamespace`;
 var PUBLIC_CREATE_SQL = `select has_schema_privilege('public', 'public', 'CREATE') as open`;
 function statements(provider3 = "generic", version = 18e4) {
   const profile = profileFor(provider3);
@@ -1767,7 +1772,7 @@ function statements(provider3 = "generic", version = 18e4) {
     { id: "read_only", title: "Make this session unable to write", sql: "set default_transaction_read_only = on" },
     { id: "session", title: "Server version and this session", sql: VERSION_SQL },
     { id: "role", title: "What the connected role is allowed to do", sql: roleSql(profile) },
-    { id: "extensions", title: "Installed extensions", sql: "select extname from pg_extension" },
+    { id: "extensions", title: "Installed extensions and their schemas", sql: EXT_SCHEMA_SQL },
     ...version < 15e4 ? [{ id: "public_create", title: "Whether every role can create objects in the public schema", sql: PUBLIC_CREATE_SQL }] : [],
     ...ALL_DEFS.filter((d) => (!d.only || d.only.includes(provider3)) && (!d.minPg || version >= d.minPg)).map((d) => ({ id: d.id, title: d.title, sql: d.sql(ctx) })),
     { id: "vitals", title: "Key numbers", sql: VITALS_SQL }
@@ -1787,7 +1792,9 @@ async function collect(connectionString, opts = {}) {
     opts.progress?.({ step: "connected", version: String(s), tls, verified });
     const role = roleInfo((await ctx.q(roleSql(profile)))[0] ?? {});
     await opts.checkRole?.(role);
-    const facts = { publicSchemaCreate: v < 15e4 ? await ctx.q(PUBLIC_CREATE_SQL).then((r) => Boolean(r[0]?.open), () => null) : null };
+    const extSchemas = Object.fromEntries((await ctx.q(EXT_SCHEMA_SQL).catch(() => [])).map((r) => [r.extname, r.nspname]));
+    const facts = { publicSchemaCreate: v < 15e4 ? await ctx.q(PUBLIC_CREATE_SQL).then((r) => Boolean(r[0]?.open), () => null) : null, extSchemas };
+    ctx.facts = facts;
     const removed = opts.queryText === "removed";
     const datasets = (await collectDatasets(ctx, (done, total) => opts.progress?.({ step: "read", done, total }))).map((d) => ({
       id: d.id,
@@ -4268,7 +4275,7 @@ function buildProgram(version, record, quiet = false) {
   connection(program.command("doctor").description("say how pg-checkup would connect and what the login can do, then stop")).action((conn, _o, cmd2) => done("doctor", conn ? [conn] : [], cmd2));
   program.command("role").description("print SQL that creates a statistics-only login").action((_o, cmd2) => done("role", [], cmd2));
   program.command("sql").description("print every query the checkup runs, in order").addOption(new Option("--provider <provider>", "the queries as run for this provider").choices(PROVIDERS2)).action((_o, cmd2) => done("sql", [], cmd2));
-  program.command("schedule").description("print a ready-made schedule (GitHub Actions, or a cron line) that runs the checkup and uploads it").addOption(new Option("--every <interval>", "how often").choices(["daily", "weekly"]).default("weekly")).option("--cron", "print a crontab line instead of a GitHub Actions file").option("--write", "write .github/workflows/pg-checkup.yml (never overwrites)").action((_o, cmd2) => done("schedule", [], cmd2));
+  program.command("schedule").description("print a ready-made schedule (GitHub Actions, or a cron line) that runs the checkup and uploads it").addOption(new Option("--every <interval>", "how often").choices(["daily", "weekly"]).default("weekly")).option("--cron", "print a crontab line instead of a GitHub Actions file").option("--write", "write .github/workflows/pg-checkup.yml (never overwrites)").option("--summary", "no account needed: the report goes to the run summary, and compares with the last run").addOption(new Option("--fail-on <severity>", "with --summary: fail the run when a finding of this severity or worse exists").choices(SEVERITIES)).action((_o, cmd2) => done("schedule", [], cmd2));
   program.command("upload").description("send a saved file to pgcheckup.com for a shareable report").argument("<file>").option("-y, --yes", "upload without asking").action((file, _o, cmd2) => done("upload", [file], cmd2));
   program.command("delete").description("remove an uploaded report").argument("<receipt>", "the receipt file written by upload").action((receipt, _o, cmd2) => done("delete", [receipt], cmd2));
   connection(program.command("baseline").description("save schema, security and settings before a migration")).action((conn, _o, cmd2) => done("baseline", conn ? [conn] : [], cmd2));
@@ -4285,13 +4292,15 @@ import { CommanderError as CommanderError2 } from "commander";
 
 // src/workload.ts
 var WINDOW_FORMAT = "pg-checkup-window";
-var WORKLOAD_SQL = `select s.userid::text || ':' || s.queryid::text || ':' || s.toplevel::text as key,
+var workloadSql = (schema) => `select s.userid::text || ':' || s.queryid::text || ':' || s.toplevel::text as key,
   md5(s.query) as family, s.calls::text as calls, s.total_exec_time as ms, s.rows::text as rows, to_jsonb(s)->>'stats_since' as since
-  from pg_stat_statements s where s.dbid = (select oid from pg_database where datname = current_database())
+  from ${schema ? `"${schema.replace(/"/g, '""')}".` : ""}pg_stat_statements s where s.dbid = (select oid from pg_database where datname = current_database())
   and s.queryid is not null and s.query is not null and s.query not like '%/* pg-checkup */%'
   order by s.userid, s.queryid, s.toplevel limit 10001`;
-var WINDOW_META_SQL = `select clock_timestamp() as at, stats_reset as reset, dealloc,
-  pg_postmaster_start_time() as restart from pg_stat_statements_info`;
+var windowMetaSql = (schema) => `select clock_timestamp() as at, stats_reset as reset, dealloc,
+  pg_postmaster_start_time() as restart from ${schema ? `"${schema.replace(/"/g, '""')}".` : ""}pg_stat_statements_info`;
+var WORKLOAD_SQL = workloadSql();
+var WINDOW_META_SQL = windowMetaSql();
 async function observe(connection3, opts = {}) {
   const seconds = opts.seconds ?? 300;
   if (!Number.isInteger(seconds) || seconds < 10 || seconds > 3600) throw new Error("Observation must last 10\u20133600 seconds.");
@@ -4302,10 +4311,12 @@ async function observe(connection3, opts = {}) {
     requireMonitoringRole(roleInfo((await q(roleSql(profileFor(provider3))))[0]), opts.allowPrivilegedRole);
     const [{ version }] = await q("select current_setting('server_version_num')::int as version");
     if (version < 14e4) throw new Error("Observation needs PostgreSQL 14+ and pg_stat_statements 1.9+ with reset tracking.");
+    const schema = (await q("select n.nspname::text as nspname from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'pg_stat_statements'"))[0]?.nspname;
+    const META = windowMetaSql(schema), COUNTERS = workloadSql(schema);
     const sample = async () => {
-      const [meta] = await q(WINDOW_META_SQL);
-      const counters = (await q(WORKLOAD_SQL)).map((r) => ({ key: String(r.key), family: String(r.family), calls: Number(r.calls), ms: Number(r.ms), rows: Number(r.rows), since: r.since ?? null }));
-      const [after] = await q(WINDOW_META_SQL);
+      const [meta] = await q(META);
+      const counters = (await q(COUNTERS)).map((r) => ({ key: String(r.key), family: String(r.family), calls: Number(r.calls), ms: Number(r.ms), rows: Number(r.rows), since: r.since ?? null }));
+      const [after] = await q(META);
       if (new Date(meta.reset).getTime() !== new Date(after.reset).getTime() || Number(meta.dealloc) !== Number(after.dealloc)) throw new Error("Statistics changed while reading counters. Repeat the observation.");
       if (counters.length > 1e4) throw new Error("More than 10,000 query entries: observation would be incomplete. Narrow the workload before comparing.");
       if (counters.some((r) => !Number.isSafeInteger(r.calls) || !Number.isSafeInteger(r.rows))) throw new Error("Query counters exceed safe numeric precision; cannot compare this window reliably.");
@@ -4433,11 +4444,64 @@ jobs:
           npx --yes pg-checkup upload checkup.json --yes --no-input
 `;
 }
+function githubSummaryWorkflow(every = "weekly", failOn) {
+  const fail2 = failOn ? ` --fail-on ${failOn}` : "";
+  return `# Runs pg-checkup ${WHEN[every]}. The report appears in the run's summary; nothing is uploaded anywhere.
+# One secret (Settings, Secrets and variables, Actions):
+#   DATABASE_URL  a statistics-only login (pg-checkup role prints the SQL to create one)
+name: pg-checkup
+on:
+  schedule:
+    - cron: "${CRON[every]}"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  checkup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Restore the previous checkup, to compare
+        uses: actions/cache/restore@v4
+        with:
+          path: .pg-checkup/previous.json
+          key: pg-checkup-\${{ github.run_id }}
+          restore-keys: pg-checkup-
+      - name: Run the checkup
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+        run: |
+          mkdir -p .pg-checkup
+          set +e
+          npx --yes pg-checkup --no-input --no-pace --no-color${fail2} -o .pg-checkup/checkup.json
+          code=$?
+          set -e
+          if [ -f .pg-checkup/checkup.json ]; then
+            npx --yes pg-checkup show .pg-checkup/checkup.json --md --no-color >> "$GITHUB_STEP_SUMMARY"
+            if [ -f .pg-checkup/previous.json ]; then
+              { echo; echo '## Since the last run'; echo; echo '\`\`\`'; npx --yes pg-checkup compare .pg-checkup/previous.json .pg-checkup/checkup.json --no-color || true; echo '\`\`\`'; } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            cp .pg-checkup/checkup.json .pg-checkup/previous.json
+          fi
+          exit $code
+      - name: Keep this checkup for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .pg-checkup/previous.json
+          key: pg-checkup-\${{ github.run_id }}
+`;
+}
 function crontabLine(every = "weekly") {
   const f = CRON[every].split(" ");
   return `${f.join(" ")} cd "$(mktemp -d)" && npx --yes pg-checkup --no-input --no-pace --no-color -o checkup.json && npx --yes pg-checkup upload checkup.json --yes --no-input`;
 }
-var SCHEDULE_NOTES = (target) => [
+var SCHEDULE_NOTES = (target) => target === "summary" ? [
+  "Nothing is uploaded. The report appears under the run in the Actions tab, and each run is compared with the one before it (the previous file is kept in the Actions cache, which GitHub clears after 7 days without use).",
+  "GitHub-hosted runners have changing IP addresses. If your database only allows listed addresses, use a self-hosted runner inside your network."
+] : [
   `Your connection string stays in ${target === "github" ? "your repository's secrets" : "this machine's environment"}. pgcheckup.com receives only the statistics file, and only through the token.`,
   `Each upload is compared with the previous one for the same database, so the report shows what was fixed, what is new, and what is getting worse.`,
   target === "github" ? `GitHub-hosted runners have changing IP addresses. If your database only allows listed addresses, use a self-hosted runner inside your network.` : `The machine running this must be able to reach the database.`
@@ -4697,7 +4761,7 @@ async function upload(text, file) {
   say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows3} rows of statistics, ${b.queryText === "removed" ? "no SQL text" : "masked SQL text"}, no table data) to ${HOST}.`);
   const code = opt("send");
   if (code !== void 0 && !/^[a-f0-9]{32}$/.test(code)) throw new Error("--send needs the code shown on pgcheckup.com/scan. Copy the whole command from the page.");
-  say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). On the plan it is a full report with fix SQL, kept, and compared with your last checkup of this database.` : `You get the same findings as a shareable web page with the evidence tables. Kept 7 days under an unguessable link; anyone with the link can read it. "pg-checkup delete" removes it. Set PGCHECKUP_TOKEN (Settings on the site) to save it to your account.`);
+  say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). With Workspace it is a full report: SQL to review, compared with your last checkup of this database, PDF and a share link.` : `You get the findings, why and fix as a web page that only you can open, kept 7 days. "pg-checkup delete" removes it. Workspace adds the SQL to review, comparison after a fix, PDF and a share link.`);
   if (code) say("Sending it because you passed --send; the page that showed the code opens the report.");
   else if (!await confirm("Upload? [y/N] ")) {
     say("Not uploaded.");
@@ -4712,6 +4776,7 @@ async function upload(text, file) {
   writeFileSync(receipt, json({ report: r.url, id: r.id, deleteKey: r.key, sha256: sha(text), uploadedAt: (/* @__PURE__ */ new Date()).toISOString() }), { flag: "wx", mode: 384 });
   if (r.sha256 !== sha(text)) throw new Error(`The server's hash does not match your file. Treat the upload as unverified: pg-checkup delete ${quote(receipt)} removes it.`);
   const report = new URL(r.url);
+  if (!r.full) report.hash = `k=${r.key}`;
   if (flag("json")) out(json({ report: String(report), receipt, sha256: r.sha256, ...r.account ? { account: r.account, full: Boolean(r.full) } : {} }));
   else {
     out(`Report:  ${report}`);
@@ -4778,7 +4843,7 @@ async function main() {
       for (const n of SCHEDULE_NOTES("cron")) say(n);
       return 0;
     }
-    const yaml = githubWorkflow(every);
+    const yaml = flag("summary") ? githubSummaryWorkflow(every, opt("fail-on")) : githubWorkflow(every);
     if (flag("write")) {
       const path = ".github/workflows/pg-checkup.yml";
       if (existsSync(path)) throw new Error(`${path} already exists; it was not changed.`);
@@ -4786,7 +4851,7 @@ async function main() {
       writeFileSync(path, yaml, { flag: "wx" });
       say(`Wrote ${path}. Add the two secrets it lists, commit it, and run it once from the Actions tab.`);
     } else out(yaml);
-    for (const n of SCHEDULE_NOTES("github")) say(n);
+    for (const n of SCHEDULE_NOTES(flag("summary") ? "summary" : "github")) say(n);
     return 0;
   }
   if (cmd === "sql") {

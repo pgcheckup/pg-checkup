@@ -112,6 +112,8 @@ export function buildProgram(version: string, record: (p: Parsed) => void, quiet
     .addOption(new Option('--every <interval>', 'how often').choices(['daily', 'weekly']).default('weekly'))
     .option('--cron', 'print a crontab line instead of a GitHub Actions file')
     .option('--write', 'write .github/workflows/pg-checkup.yml (never overwrites)')
+    .option('--summary', 'no account needed: the report goes to the run summary, and compares with the last run')
+    .addOption(new Option('--fail-on <severity>', 'with --summary: fail the run when a finding of this severity or worse exists').choices(SEVERITIES))
     .action((_o, cmd: Command) => done('schedule', [], cmd));
   program.command('upload').description('send a saved file to pgcheckup.com for a shareable report').argument('<file>')
     .option('-y, --yes', 'upload without asking')

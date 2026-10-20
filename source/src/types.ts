@@ -32,6 +32,9 @@ export interface Finding {
 export interface Facts {
   /** PostgreSQL 14 and earlier: whether PUBLIC can CREATE in the public schema. Null when not read. */
   publicSchemaCreate?: boolean | null;
+  /** Schema of each installed extension, so its views and functions are named in full. Providers such as Supabase
+   * install extensions outside public, and a statistics-only login does not have that schema on its search path. */
+  extSchemas?: Record<string, string>;
 }
 
 /** What the checks see. Everything here comes from the collected bundle, so analysis needs no connection. */

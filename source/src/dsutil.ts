@@ -27,8 +27,10 @@ export const ut = (c: Ctx, schemaCol: string, tableCol: string) => userTableSql(
  */
 export const TOOLING_SQL = String.raw`(pg_catalog\.|information_schema\.|\mpg_(timezone_names|available_extensions|extension|namespace|class|proc|policy|policies|type|attribute|attrdef|constraint|index|indexes|roles|authid|auth_members|database|settings|stat_|statio_|description|depend|trigger|rewrite|enum|inherits|tables|views|sequences|locks|replication_slots)\M)`;
 export const inDb = "(select oid from pg_database where datname = current_database())";
+/** An extension's view or function, schema-qualified when the schema is known: `"extensions".pg_stat_statements`. */
+export const extq = (c: Ctx, name: string, ext = name) => { const s = c.facts?.extSchemas?.[ext]; return s ? `"${s.replace(/"/g, '""')}".${name}` : name; };
 /** pg_stat_statements rows for this database, excluding provider-internal roles and ourselves. */
-export const pgss = (c: Ctx) => `from pg_stat_statements s join pg_roles r on r.oid = s.userid
+export const pgss = (c: Ctx) => `from ${extq(c, "pg_stat_statements")} s join pg_roles r on r.oid = s.userid
   where s.dbid = ${inDb} and not ${c.profile.managedRoleSql("r.rolname")} and s.query !~* '${TOOLING_SQL}' and s.query not like '%/* pg-checkup */%'`;
 /** Setting names whose values may hold credentials (connection strings, keys, tokens, commands that embed them). */
 export const SECRET_NAME = String.raw`(pass|secret|token|conninfo|credential|api_?key|private|_command$|(^|[._])key($|[._]))`;

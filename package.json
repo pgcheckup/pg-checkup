@@ -1,6 +1,6 @@
 {
   "name": "pg-checkup",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Read-only checkup of a PostgreSQL database, run on your machine. Nothing leaves it unless you say so.",
   "type": "module",
   "bin": {

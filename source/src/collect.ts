@@ -13,7 +13,7 @@ import { fingerprint } from "./fingerprint.js";
 
 /** Tag on every scanner statement so it can be excluded from the customer's query statistics. */
 export const TAG = "/* pg-checkup */";
-export const COLLECTOR_VERSION = "0.3.0";
+export const COLLECTOR_VERSION = "0.3.1";
 
 const LOCAL = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 /** True for a database on this machine, where the login is the person's own and a read-only session is enough. */
@@ -74,6 +74,7 @@ export interface CollectOptions extends ScanOptions {
 }
 
 const VERSION_SQL = `select current_setting('server_version_num')::int as v, version() as s, pg_backend_pid() as pid`;
+const EXT_SCHEMA_SQL = `select e.extname::text as extname, n.nspname::text as nspname from pg_extension e join pg_namespace n on n.oid = e.extnamespace`;
 const PUBLIC_CREATE_SQL = `select has_schema_privilege('public', 'public', 'CREATE') as open`;
 
 /**
@@ -87,7 +88,7 @@ export function statements(provider: ProviderId = "generic", version = 180000): 
     { id: "read_only", title: "Make this session unable to write", sql: "set default_transaction_read_only = on" },
     { id: "session", title: "Server version and this session", sql: VERSION_SQL },
     { id: "role", title: "What the connected role is allowed to do", sql: roleSql(profile) },
-    { id: "extensions", title: "Installed extensions", sql: "select extname from pg_extension" },
+    { id: "extensions", title: "Installed extensions and their schemas", sql: EXT_SCHEMA_SQL },
     ...(version < 150000 ? [{ id: "public_create", title: "Whether every role can create objects in the public schema", sql: PUBLIC_CREATE_SQL }] : []),
     ...ALL_DEFS.filter((d) => (!d.only || d.only.includes(provider)) && (!d.minPg || version >= d.minPg)).map((d) => ({ id: d.id, title: d.title, sql: d.sql(ctx) })),
     { id: "vitals", title: "Key numbers", sql: VITALS_SQL },
@@ -111,7 +112,9 @@ export async function collect(connectionString: string, opts: CollectOptions = {
     opts.progress?.({ step: "connected", version: String(s), tls, verified });
     const role = roleInfo((await ctx.q(roleSql(profile)))[0] ?? {});
     await opts.checkRole?.(role);
-    const facts = { publicSchemaCreate: v < 150000 ? await ctx.q(PUBLIC_CREATE_SQL).then((r) => Boolean(r[0]?.open), () => null) : null };
+    const extSchemas = Object.fromEntries((await ctx.q<{ extname: string; nspname: string }>(EXT_SCHEMA_SQL).catch(() => [])).map((r) => [r.extname, r.nspname]));
+    const facts = { publicSchemaCreate: v < 150000 ? await ctx.q(PUBLIC_CREATE_SQL).then((r) => Boolean(r[0]?.open), () => null) : null, extSchemas };
+    ctx.facts = facts;
     const removed = opts.queryText === "removed";
     const datasets: BundleDataset[] = (await collectDatasets(ctx, (done, total) => opts.progress?.({ step: "read", done, total }))).map((d) => ({
       id: d.id, title: d.title, source: d.source, capped: d.capped,

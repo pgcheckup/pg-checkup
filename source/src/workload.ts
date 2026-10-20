@@ -15,13 +15,16 @@ export interface WorkloadComparison { comparable: boolean; reasons: string[]; qu
 
 // queryid is not stable across a logical migration (catalog OIDs change). Match exact representative SQL hashes
 // across hosts, but use queryid/userid/toplevel to subtract counters within one host. No SQL text leaves Postgres.
-export const WORKLOAD_SQL = `select s.userid::text || ':' || s.queryid::text || ':' || s.toplevel::text as key,
+/** The two queries, with the extension's schema when known (through a transaction pooler, search_path cannot be relied on). */
+export const workloadSql = (schema?: string) => `select s.userid::text || ':' || s.queryid::text || ':' || s.toplevel::text as key,
   md5(s.query) as family, s.calls::text as calls, s.total_exec_time as ms, s.rows::text as rows, to_jsonb(s)->>'stats_since' as since
-  from pg_stat_statements s where s.dbid = (select oid from pg_database where datname = current_database())
+  from ${schema ? `"${schema.replace(/"/g, '""')}".` : ""}pg_stat_statements s where s.dbid = (select oid from pg_database where datname = current_database())
   and s.queryid is not null and s.query is not null and s.query not like '%/* pg-checkup */%'
   order by s.userid, s.queryid, s.toplevel limit 10001`;
-export const WINDOW_META_SQL = `select clock_timestamp() as at, stats_reset as reset, dealloc,
-  pg_postmaster_start_time() as restart from pg_stat_statements_info`;
+export const windowMetaSql = (schema?: string) => `select clock_timestamp() as at, stats_reset as reset, dealloc,
+  pg_postmaster_start_time() as restart from ${schema ? `"${schema.replace(/"/g, '""')}".` : ""}pg_stat_statements_info`;
+export const WORKLOAD_SQL = workloadSql();
+export const WINDOW_META_SQL = windowMetaSql();
 
 export async function observe(connection: string, opts: { seconds?: number; label?: string; representative?: boolean; provider?: ProviderId; allowPrivilegedRole?: boolean; progress?: (remaining: number) => void; signal?: AbortSignal } = {}): Promise<WorkloadWindow> {
   const seconds = opts.seconds ?? 300;
@@ -33,10 +36,12 @@ export async function observe(connection: string, opts: { seconds?: number; labe
     requireMonitoringRole(roleInfo((await q(roleSql(profileFor(provider))))[0]), opts.allowPrivilegedRole);
     const [{ version }] = await q("select current_setting('server_version_num')::int as version");
     if (version < 140000) throw new Error('Observation needs PostgreSQL 14+ and pg_stat_statements 1.9+ with reset tracking.');
+    const schema = (await q("select n.nspname::text as nspname from pg_extension e join pg_namespace n on n.oid = e.extnamespace where e.extname = 'pg_stat_statements'"))[0]?.nspname as string | undefined;
+    const META = windowMetaSql(schema), COUNTERS = workloadSql(schema);
     const sample = async (): Promise<Sample> => {
-      const [meta] = await q(WINDOW_META_SQL);
-      const counters = (await q(WORKLOAD_SQL)).map((r) => ({ key: String(r.key), family: String(r.family), calls: Number(r.calls), ms: Number(r.ms), rows: Number(r.rows), since: r.since ?? null }));
-      const [after] = await q(WINDOW_META_SQL);
+      const [meta] = await q(META);
+      const counters = (await q(COUNTERS)).map((r) => ({ key: String(r.key), family: String(r.family), calls: Number(r.calls), ms: Number(r.ms), rows: Number(r.rows), since: r.since ?? null }));
+      const [after] = await q(META);
       if (new Date(meta.reset).getTime() !== new Date(after.reset).getTime() || Number(meta.dealloc) !== Number(after.dealloc)) throw new Error('Statistics changed while reading counters. Repeat the observation.');
       if (counters.length > 10000) throw new Error('More than 10,000 query entries: observation would be incomplete. Narrow the workload before comparing.');
       if (counters.some((r) => !Number.isSafeInteger(r.calls) || !Number.isSafeInteger(r.rows))) throw new Error('Query counters exceed safe numeric precision; cannot compare this window reliably.');
