@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/collector-cli.ts
-import { readFileSync as readFileSync3, writeFileSync, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync2, writeFileSync, statSync as statSync2, mkdirSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { spawnSync } from "node:child_process";
 import { createHash as createHash2, randomBytes } from "node:crypto";
@@ -181,7 +181,6 @@ function redactUrl(url) {
 
 // src/collect.ts
 import net from "node:net";
-import { readFileSync as readFileSync2 } from "node:fs";
 import pg from "pg";
 
 // src/provider.ts
@@ -342,7 +341,7 @@ var MORE = [
     source: "pgstattuple_approx()",
     limit: 15,
     ext: "pgstattuple",
-    hint: "Install pgstattuple to measure bloat instead of guessing: create extension pgstattuple; (the pg_monitor role can run it).",
+    hint: "Install pgstattuple to measure bloat instead of estimating: create extension pgstattuple; (the pg_monitor role can run it).",
     description: "Wasted space in the largest tables, measured with pgstattuple_approx (uses the visibility map, so it is cheap).",
     columns: [C("table", "Table", "mono"), C("bytes", "Size", "bytes"), C("dead_pct", "Dead", "pct"), C("free_pct", "Free space", "pct"), C("bloat_pct", "Bloat", "pct", { warn: 30, bad: 60 }), C("wasted_bytes", "Wasted", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", pg_relation_size(t.oid) as bytes, round(a.dead_tuple_percent::numeric, 1) as dead_pct, round(a.approx_free_percent::numeric, 1) as free_pct,
@@ -1004,7 +1003,7 @@ var DEFS = [
     sql: (c) => `select n.nspname || '.' || t.relname as "table", array_to_string(array_agg(ic.relname order by ic.relname), ', ') as indexes, count(*)::int as copies, sum(pg_relation_size(i.indexrelid))::bigint as bytes
       from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_class t on t.oid = i.indrelid join pg_namespace n on n.oid = t.relnamespace
       where ${us(c, "n.nspname")} and i.indisvalid
-      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
+      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, i.indimmediate, ${c.version >= 15e4 ? "i.indnullsnotdistinct," : ""} ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
       having count(*) > 1 order by bytes desc limit 25`
   },
   {
@@ -1400,6 +1399,72 @@ var DEFS = [
       left(coalesce(qual, ''), 300) as using_expr, left(coalesce(with_check, ''), 300) as check_expr
       from pg_policies where ${us(c, "schemaname")} order by 5 desc, 1, 2 limit 60`
   },
+  {
+    id: "s_policy_calls",
+    section: "security",
+    title: "Functions called by policies",
+    source: "pg_policy, pg_proc",
+    limit: 60,
+    description: "Each policy's expression, with the volatility of every function it names (i immutable, s stable, v volatile). PostgreSQL runs a stable or volatile function in a row filter once per row; a scalar sub-select with no outer references is evaluated once per query instead.",
+    columns: [C("table", "Table", "mono"), C("policy", "Policy", "mono"), C("cmd", "Command"), C("est_rows", "Est. rows", "int"), C("fn_vols", "Functions", "mono"), C("expr", "Expression", "mono")],
+    sql: (c) => `with pol as (
+        select n.nspname || '.' || t.relname as tbl, p.polname::text as policy, p.polcmd, t.reltuples::bigint as est_rows,
+          concat_ws(' ', pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)) as expr
+        from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+        where ${us(c, "n.nspname")} and t.relkind in ('r','p'))
+      select tbl as "table", policy, case polcmd when 'r' then 'SELECT' when 'a' then 'INSERT' when 'w' then 'UPDATE' when 'd' then 'DELETE' else 'ALL' end as cmd,
+        est_rows, left(expr, 2000) as expr,
+        (select string_agg(x.name || ':' || x.vol, ',' order by x.name) from (
+           select m.name, min(pr.provolatile::text) as vol
+           from (select distinct (regexp_matches(pol.expr, '([A-Za-z_][A-Za-z0-9_]*)\\s*\\(', 'g'))[1] as name) m
+           join pg_proc pr on pr.proname = m.name group by m.name) x) as fn_vols
+      from pol where expr ~ '\\(' order by est_rows desc, 1, 2 limit 60`
+  },
+  {
+    id: "s_policy_overlap",
+    section: "security",
+    title: "Policies stacked on one table",
+    source: "pg_policy",
+    limit: 60,
+    description: "Tables where more than one permissive policy applies to the same role and command. Permissive policies are combined with OR, so PostgreSQL evaluates each of them for every row it checks.",
+    columns: [C("table", "Table", "mono"), C("role", "Role", "mono"), C("cmd", "Command"), C("policies", "Policies", "int", { warn: 3, bad: 5 }), C("names", "Names", "mono")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", case when x.roleid = 0 then 'public' else r.rolname::text end as role, x.cmd, count(*)::int as policies, string_agg(x.polname::text, ', ' order by x.polname) as names
+      from (select p.polrelid, p.polname, unnest(case when p.polroles = '{0}'::oid[] then array[0::oid] else p.polroles end) as roleid, k.cmd
+              from pg_policy p, lateral (values ('SELECT', 'r'), ('INSERT', 'a'), ('UPDATE', 'w'), ('DELETE', 'd')) k(cmd, code)
+             where p.polpermissive and (p.polcmd = '*' or p.polcmd = k.code)) x
+      join pg_class t on t.oid = x.polrelid join pg_namespace n on n.oid = t.relnamespace left join pg_roles r on r.oid = x.roleid
+      where ${us(c, "n.nspname")} group by 1, 2, 3 having count(*) > 1 order by policies desc, 1 limit 60`
+  },
+  {
+    id: "s_policy_unindexed",
+    section: "security",
+    title: "Policy columns without an index",
+    source: "pg_policy, pg_depend, pg_index",
+    limit: 60,
+    description: "Columns a policy's expression reads on its own table, for tables of about 10,000 rows or more, where no index starts with that column. Without one, a policy that compares the column cannot use an index scan.",
+    columns: [C("table", "Table", "mono"), C("column", "Column", "mono"), C("policies", "Policies", "mono"), C("est_rows", "Est. rows", "int")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", a.attname::text as "column", string_agg(distinct p.polname::text, ', ') as policies, t.reltuples::bigint as est_rows
+      from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+      join pg_depend d on d.classid = 'pg_policy'::regclass and d.objid = p.oid and d.refclassid = 'pg_class'::regclass and d.refobjid = p.polrelid and d.refobjsubid > 0
+      join pg_attribute a on a.attrelid = p.polrelid and a.attnum = d.refobjsubid
+      where ${us(c, "n.nspname")} and t.relkind in ('r','p') and t.reltuples >= 10000
+        and not exists (select 1 from pg_index i where i.indrelid = p.polrelid and i.indisvalid and i.indkey[0] = a.attnum)
+      group by 1, 2, t.reltuples order by est_rows desc, 1, 2 limit 60`
+  },
+  {
+    id: "s_policy_lookups",
+    section: "security",
+    title: "Policies that read other tables",
+    source: "pg_policy, pg_depend",
+    limit: 60,
+    description: "Policies whose expression reads a different table, for example through EXISTS or IN. That read runs as part of every query on the protected table, and is itself subject to row-level security when the other table has it enabled.",
+    columns: [C("table", "Table", "mono"), C("policy", "Policy", "mono"), C("reads", "Reads", "mono"), C("reads_rls", "Read table has RLS", "bool")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", p.polname::text as policy, string_agg(distinct rn.nspname || '.' || rt.relname, ', ') as reads, bool_or(rt.relrowsecurity) as reads_rls
+      from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+      join pg_depend d on d.classid = 'pg_policy'::regclass and d.objid = p.oid and d.refclassid = 'pg_class'::regclass and d.refobjid <> p.polrelid
+      join pg_class rt on rt.oid = d.refobjid and rt.relkind in ('r','p','v','m') join pg_namespace rn on rn.oid = rt.relnamespace
+      where ${us(c, "n.nspname")} group by 1, 2 order by bool_or(rt.relrowsecurity) desc, 1, 2 limit 60`
+  },
   // ───────── Extensions
   {
     id: "e_installed",
@@ -1413,9 +1478,9 @@ var DEFS = [
       from pg_extension e join pg_namespace n on n.oid = e.extnamespace left join pg_available_extensions av on av.name = e.extname order by 4 desc, 1 limit 60`
   }
 ];
-function normalize(rows2, cols) {
+function normalize(rows3, cols) {
   const kind = new Map(cols.map((c) => [c.key, c.kind ?? "text"]));
-  return rows2.map((r) => {
+  return rows3.map((r) => {
     const out2 = {};
     for (const [k, v] of Object.entries(r)) {
       if (v instanceof Date) out2[k] = v.toISOString();
@@ -1442,8 +1507,8 @@ async function collectDatasets(c, onRead) {
       continue;
     }
     try {
-      const rows2 = normalize(await c.q(d.sql(c)), d.columns);
-      out2.push({ ...base2, rows: rows2, capped: rows2.length >= (d.limit ?? 50) });
+      const rows3 = normalize(await c.q(d.sql(c)), d.columns);
+      out2.push({ ...base2, rows: rows3, capped: rows3.length >= (d.limit ?? 50) });
     } catch (e) {
       if (isConnectionLost(e)) throw e;
       out2.push({ ...base2, error: String(e.message ?? e).replace(/postgres(ql)?:\/\/\S+/g, "[connection string]") });
@@ -1529,14 +1594,14 @@ function parseBundle(input) {
     seen.add(id);
     const rowsIn = d.rows;
     if (!Array.isArray(rowsIn)) fail(`${id}.rows must be a list`);
-    const rows2 = rowsIn.slice(0, def.limit ?? 50).map((r, i) => {
+    const rows3 = rowsIn.slice(0, def.limit ?? 50).map((r, i) => {
       if (!isObj(r)) fail(`${id} row ${i} must be an object`);
       const entries = Object.entries(r);
       if (entries.length > 40) fail(`${id} row ${i} has too many fields`);
       return Object.fromEntries(entries.map(([k, v]) => [KEY.test(k) ? k : fail(`${id} has a field named "${k.slice(0, 40)}"`), cell(v, `${id}.${k}`)]));
     });
     const note = d.note, error = d.error;
-    datasets.push({ id, rows: rows2, capped: Boolean(d.capped), ...typeof note === "string" ? { note: note.slice(0, 500) } : {}, ...typeof error === "string" ? { error: error.slice(0, 500) } : {} });
+    datasets.push({ id, rows: rows3, capped: Boolean(d.capped), ...typeof note === "string" ? { note: note.slice(0, 500) } : {}, ...typeof error === "string" ? { error: error.slice(0, 500) } : {} });
   }
   const facts = isObj(b.facts) ? b.facts : {};
   const qt = b.queryText === "removed" ? "removed" : "masked";
@@ -1660,46 +1725,31 @@ var pinned = (address) => () => {
   return s;
 };
 var base = (connectionString, address) => ({ connectionString, statement_timeout: 15e3, connectionTimeoutMillis: 1e4, application_name: "pg-checkup", ...address ? { stream: pinned(address) } : {} });
-var CERT_ERRORS = /SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER|DEPTH_ZERO|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|certificate/i;
 async function connect(url, local, address) {
   const u = new URL(url);
   const explicit = u.searchParams.has("sslmode") || u.searchParams.has("ssl");
-  if (local || explicit) {
-    const db = new pg.Client(base(url, address));
-    db.on("error", () => {
-    });
-    await db.connect();
-    const mode = u.searchParams.get("sslmode") ?? "";
-    const tls = explicit ? !/^(disable|allow)$/.test(mode) : false;
-    return { db, tls, verified: tls && /^verify-(ca|full)$/.test(mode) };
+  if (!local && !explicit) u.searchParams.set("sslmode", "verify-full");
+  const mode = u.searchParams.get("sslmode");
+  const tlsWanted = mode ? mode !== "disable" : !local && u.searchParams.get("ssl") !== "0";
+  if (process.env.PGSSLROOTCERT && !u.searchParams.has("sslrootcert") && tlsWanted) {
+    u.searchParams.set("sslrootcert", process.env.PGSSLROOTCERT);
   }
-  let ca;
-  if (process.env.PGSSLROOTCERT) {
-    try {
-      ca = readFileSync2(process.env.PGSSLROOTCERT, "utf8");
-    } catch {
-    }
+  let db;
+  try {
+    db = new pg.Client(base(u.toString(), address));
+  } catch (e) {
+    throw new Error(`Could not set up the connection: ${e.message}. If PGSSLROOTCERT is set, check that the file exists and is readable.`);
   }
-  const verified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: true, ...ca ? { ca } : {} } });
-  verified.on("error", () => {
+  db.on("error", () => {
   });
   try {
-    await verified.connect();
-    return { db: verified, tls: true, verified: true };
+    await db.connect();
+    const ssl = db.ssl;
+    return { db, tls: Boolean(ssl), verified: Boolean(ssl && (typeof ssl !== "object" || ssl.rejectUnauthorized !== false)) };
   } catch (e) {
-    if (/does not support SSL/i.test(String(e.message))) {
-      const plain = new pg.Client(base(url, address));
-      plain.on("error", () => {
-      });
-      await plain.connect();
-      return { db: plain, tls: false, verified: false };
-    }
-    if (!CERT_ERRORS.test(`${e.code ?? ""} ${e.message ?? ""}`)) throw e;
-    const unverified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: false } });
-    unverified.on("error", () => {
+    await db.end().catch(() => {
     });
-    await unverified.connect();
-    return { db: unverified, tls: true, verified: false };
+    throw e;
   }
 }
 async function openReadOnlySession(connectionString, address) {
@@ -1790,8 +1840,8 @@ var CATEGORY = {
 };
 
 // src/checkdef.ts
-var pl = (n, one, many) => n === 1 ? one : many;
-var top = (rows2, n = 10) => rows2.slice(0, n);
+var pl = (n, one2, many) => n === 1 ? one2 : many;
+var top = (rows3, n = 10) => rows3.slice(0, n);
 var GB = 1024 ** 3;
 var MB = 1024 ** 2;
 
@@ -1820,8 +1870,8 @@ var CHECKS_A = [
     looks: "The share of total application query time taken by the top statement, after catalog and tooling queries are excluded.",
     flags: "Warning when one statement is 30% or more of at least 60 s of recorded application query time.",
     uses: ["q_total"],
-    run: ({ ctx, rows: rows2 }) => {
-      const r = rows2("q_total");
+    run: ({ ctx, rows: rows3 }) => {
+      const r = rows3("q_total");
       const t = r[0];
       const minMs = ctx.opts.minWorkloadMs ?? 6e4;
       if (!t) return { note: "No application statements recorded yet." };
@@ -1843,8 +1893,8 @@ var CHECKS_A = [
     looks: "Statements called 5+ times whose mean time is high.",
     flags: "Warning for any averaging 1 second or more.",
     uses: ["q_mean"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("q_mean").filter((x) => num(x.mean_ms) >= 1e3);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("q_mean").filter((x) => num(x.mean_ms) >= 1e3);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "query averages", "queries average")} over 1 second`,
@@ -1861,8 +1911,8 @@ var CHECKS_A = [
     looks: "Statements writing large temp files because work_mem is exceeded.",
     flags: "Info at roughly 800 MB or more of temp writes per statement.",
     uses: ["q_temp"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("q_temp").filter((x) => num(x.temp_bytes) >= 8192e5);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("q_temp").filter((x) => num(x.temp_bytes) >= 8192e5);
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "query spills", "queries spill")} heavily to temp files`,
@@ -1879,8 +1929,8 @@ var CHECKS_A = [
     looks: "Whether pg_stat_statements is dropping old statements.",
     flags: "Info when any statements were evicted.",
     uses: ["q_pgss"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("q_pgss")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("q_pgss")[0];
       return r && num(r.dealloc) > 0 ? {
         severity: "info",
         title: `${num(r.dealloc).toLocaleString()} statements were evicted from tracking`,
@@ -1898,8 +1948,8 @@ var CHECKS_A = [
     looks: "Tables over 50,000 rows read mostly by sequential scan.",
     flags: "Warning when seq scans exceed 100 and 5x the index scans.",
     uses: ["t_seq"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("t_seq").filter((x) => num(x.live_rows) > 5e4 && num(x.seq_scan) > 100 && num(x.seq_scan) > 5 * num(x.idx_scan));
+    run: ({ rows: rows3 }) => {
+      const r = rows3("t_seq").filter((x) => num(x.live_rows) > 5e4 && num(x.seq_scan) > 100 && num(x.seq_scan) > 5 * num(x.idx_scan));
       return r.length ? {
         severity: "warning",
         title: `${r.length} large ${pl(r.length, "table is", "tables are")} mostly read by sequential scan`,
@@ -1937,8 +1987,8 @@ var CHECKS_A = [
     looks: "Tables without a primary key.",
     flags: "Info for a table with 1,000+ rows or over 8 MB; smaller ones are only noted.",
     uses: ["t_nopk"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("t_nopk");
+    run: ({ rows: rows3 }) => {
+      const all = rows3("t_nopk");
       const r = all.filter((x) => num(x.est_rows) >= 1e3 || num(x.bytes) >= 8 * MB);
       if (r.length) return {
         severity: "info",
@@ -1957,8 +2007,8 @@ var CHECKS_A = [
     looks: "Tables with many changes since the last ANALYZE.",
     flags: "Warning when 20%+ of a 10k+ row table changed and it wasn't analyzed in the last day.",
     uses: ["t_stale"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("t_stale").filter((x) => num(x.live_rows) >= 1e4 && num(x.mod_pct) >= 20 && age(x.last_analyzed) > 86400);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("t_stale").filter((x) => num(x.live_rows) >= 1e4 && num(x.mod_pct) >= 20 && age(x.last_analyzed) > 86400);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "table has", "tables have")} stale planner statistics`,
@@ -1975,10 +2025,10 @@ var CHECKS_A = [
     looks: "Measured wasted space in the largest tables (needs pgstattuple).",
     flags: "Warning at 40%+ bloat when the waste is at least 5% of the database (never under 8 MB, never required above 100 MB); critical at 60%+ when it is 1 GB or a fifth of the database.",
     uses: ["t_bloat", "cfg_version"],
-    run: ({ ctx, rows: rows2 }) => {
-      const db = num(rows2("cfg_version")[0]?.db_bytes);
+    run: ({ ctx, rows: rows3 }) => {
+      const db = num(rows3("cfg_version")[0]?.db_bytes);
       const min = ctx.opts.minBloatBytes ?? Math.max(8 * MB, Math.min(100 * MB, 0.05 * db));
-      const r = rows2("t_bloat").filter((x) => num(x.bloat_pct) >= 40 && num(x.wasted_bytes) >= min);
+      const r = rows3("t_bloat").filter((x) => num(x.bloat_pct) >= 40 && num(x.wasted_bytes) >= min);
       if (!r.length) return null;
       const wasted = r.reduce((a, x) => a + num(x.wasted_bytes), 0);
       const crit = r.some((x) => num(x.bloat_pct) >= 60 && (num(x.wasted_bytes) >= GB || db > 0 && num(x.wasted_bytes) >= 0.2 * db));
@@ -1999,8 +2049,8 @@ var CHECKS_A = [
     looks: "Indexes left invalid by a failed CREATE INDEX CONCURRENTLY.",
     flags: "Warning for any.",
     uses: ["i_invalid"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("i_invalid");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("i_invalid");
       return r.length ? {
         severity: "warning",
         title: `${r.length} invalid ${pl(r.length, "index", "indexes")}`,
@@ -2017,8 +2067,8 @@ var CHECKS_A = [
     looks: "Indexes over 8 MB that were never scanned since the stats reset.",
     flags: "Info for any.",
     uses: ["i_unused"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("i_unused").filter((x) => num(x.bytes) > 8 * MB);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("i_unused").filter((x) => num(x.bytes) > 8 * MB);
       return r.length ? {
         severity: "info",
         title: `${r.length} large ${pl(r.length, "index was", "indexes were")} never used`,
@@ -2035,8 +2085,8 @@ var CHECKS_A = [
     looks: "Identical indexes on the same table.",
     flags: "Info when they waste 1 MB or more; warning at 100 MB. Smaller ones are only noted.",
     uses: ["i_dup"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("i_dup");
+    run: ({ rows: rows3 }) => {
+      const all = rows3("i_dup");
       if (!all.length) return null;
       const waste = all.reduce((n, x) => n + num(x.bytes) * (1 - 1 / num(x.copies)), 0);
       if (waste < MB) return { note: `${all.length} ${pl(all.length, "set", "sets")} of duplicate indexes on tiny tables (${Math.round(waste / 1024)} KB wasted): ${all.slice(0, 3).map((x) => x.indexes).join("; ")}.` };
@@ -2050,8 +2100,8 @@ var CHECKS_A = [
     looks: "Non-unique indexes that are the leading columns of a longer index.",
     flags: "Info when the redundant index is 1 MB or more; smaller ones are only noted.",
     uses: ["i_redundant"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("i_redundant");
+    run: ({ rows: rows3 }) => {
+      const all = rows3("i_redundant");
       const r = all.filter((x) => num(x.bytes) >= MB);
       if (r.length) return { severity: "info", title: `${r.length} redundant ${pl(r.length, "index", "indexes")}`, why: "A longer index on the same columns already serves those queries.", fix: "Drop the shorter index after checking it isn't required by a constraint.", evidence: top(r) };
       return all.length ? { note: `${all.length} redundant ${pl(all.length, "index", "indexes")} on tiny tables (under 1 MB each): ${all.slice(0, 3).map((x) => x.redundant).join(", ")}. Not worth acting on yet.` } : null;
@@ -2064,8 +2114,8 @@ var CHECKS_A = [
     looks: "Foreign-key columns with no supporting index.",
     flags: "Warning when a referencing table has 10k+ rows; info at 1,000+. Smaller tables are only noted.",
     uses: ["i_fk"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("i_fk");
+    run: ({ rows: rows3 }) => {
+      const all = rows3("i_fk");
       const r = all.filter((x) => num(x.est_rows) >= 1e3);
       if (r.length) return {
         severity: r.some((x) => num(x.est_rows) >= 1e4) ? "warning" : "info",
@@ -2085,8 +2135,8 @@ var CHECKS_A = [
     looks: "How much of each sequence's range is used (integer keys run out at about 2.1 billion).",
     flags: "Warning at 70% used; critical at 90%.",
     uses: ["sch_seq"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("sch_seq");
+    run: ({ rows: rows3 }) => {
+      const all = rows3("sch_seq");
       const readable = all.filter((x) => x.readable);
       const hot = readable.filter((x) => num(x.pct_used) >= 70 && !x.cycle);
       if (hot.length) return {
@@ -2107,8 +2157,8 @@ var CHECKS_A = [
     looks: "Constraints added NOT VALID that were never validated.",
     flags: "Info for any.",
     uses: ["sch_notvalid"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("sch_notvalid");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("sch_notvalid");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "constraint is", "constraints are")} not validated`,
@@ -2125,8 +2175,8 @@ var CHECKS_A = [
     looks: "Triggers switched off.",
     flags: "Info for any.",
     uses: ["sch_triggers"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("sch_triggers");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("sch_triggers");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "trigger is", "triggers are")} disabled`,
@@ -2144,8 +2194,8 @@ var CHECKS_A = [
     looks: "Queries currently waiting for a lock held by another session.",
     flags: "Warning; critical if anything waits 30 s or more.",
     uses: ["b_blocked"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("b_blocked");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("b_blocked");
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.waiting_s) >= 30) ? "critical" : "warning",
@@ -2163,9 +2213,9 @@ var CHECKS_A = [
     looks: "Sessions that opened a transaction and went quiet.",
     flags: "Warning at 5 minutes idle.",
     uses: ["b_idle"],
-    run: ({ ctx, rows: rows2 }) => {
+    run: ({ ctx, rows: rows3 }) => {
       const min = ctx.opts.idleTxnSeconds ?? 300;
-      const r = rows2("b_idle").filter((x) => num(x.idle_s) >= min);
+      const r = rows3("b_idle").filter((x) => num(x.idle_s) >= min);
       return r.length ? {
         severity: "warning",
         title: `${r.length} ${pl(r.length, "session is", "sessions are")} idle in a transaction`,
@@ -2182,8 +2232,8 @@ var CHECKS_A = [
     looks: "Statements that have been executing for a long time.",
     flags: "Info at 5 minutes; warning at 30 minutes.",
     uses: ["b_running"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("b_running").filter((x) => num(x.running_s) >= 300);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("b_running").filter((x) => num(x.running_s) >= 300);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.running_s) >= 1800) ? "warning" : "info",
@@ -2201,8 +2251,8 @@ var CHECKS_A = [
     looks: "Two-phase-commit transactions left prepared.",
     flags: "Warning after 5 minutes; critical after 1 hour.",
     uses: ["b_prepared"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("b_prepared").filter((x) => num(x.age_s) >= 300);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("b_prepared").filter((x) => num(x.age_s) >= 300);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num(x.age_s) >= 3600) ? "critical" : "warning",
@@ -2220,8 +2270,8 @@ var CHECKS_A = [
     looks: "The oldest xmin held by a session, slot, prepared transaction or standby.",
     flags: "Warning at 10 million transactions old; critical at 100 million.",
     uses: ["b_xmin"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("b_xmin");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("b_xmin");
       const t = r[0];
       if (!t || num(t.xmin_age) < 1e7) return null;
       return {
@@ -2241,8 +2291,8 @@ var CHECKS_A = [
     looks: "Client connections as a share of max_connections.",
     flags: "Warning at 80%; critical at 90%.",
     uses: ["c_limits"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("c_limits")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("c_limits")[0];
       if (!r || num(r.used_pct) < 80) return null;
       return {
         severity: num(r.used_pct) >= 90 ? "critical" : "warning",
@@ -2260,8 +2310,8 @@ var CHECKS_A = [
     looks: "Many mostly-idle connections.",
     flags: "Info at 50+ idle and 40%+ of max_connections.",
     uses: ["c_limits"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("c_limits")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("c_limits")[0];
       if (!r || num(r.idle) < 50 || num(r.idle) < 0.4 * num(r.max_connections)) return null;
       return {
         severity: "info",
@@ -2279,8 +2329,8 @@ var CHECKS_A = [
     looks: "Remote sessions connected without encryption (excludes this scan and provider services).",
     flags: "Warning for any.",
     uses: ["c_ssl"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("c_ssl").filter((x) => x.remote && !x.encrypted);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("c_ssl").filter((x) => x.remote && !x.encrypted);
       const n = r.reduce((a, x) => a + num(x.sessions), 0);
       return n ? {
         severity: "warning",
@@ -2325,8 +2375,8 @@ var CHECKS_B = [
     looks: "Inactive or lost replication slots that pin WAL.",
     flags: "Warning; critical if a slot is lost or retains 5 GB+.",
     uses: ["r_slots"],
-    run: ({ ctx, rows: rows2 }) => {
-      const r = rows2("r_slots").filter((x) => !ctx.profile.internalSlots.includes(String(x.slot))).filter((x) => !x.active || x.status === "unreserved" || x.status === "lost");
+    run: ({ ctx, rows: rows3 }) => {
+      const r = rows3("r_slots").filter((x) => !ctx.profile.internalSlots.includes(String(x.slot))).filter((x) => !x.active || x.status === "unreserved" || x.status === "lost");
       if (!r.length) return null;
       return {
         severity: r.some((x) => x.status === "lost" || num2(x.retained_bytes) > 5 * GB) ? "critical" : "warning",
@@ -2344,8 +2394,8 @@ var CHECKS_B = [
     looks: "Replay lag of connected replicas.",
     flags: "Warning at 60 s or 1 GB behind; critical at 300 s or 10 GB.",
     uses: ["r_standby"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("r_standby").filter((x) => num2(x.replay_lag_s) >= 60 || num2(x.replay_bytes) >= GB);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("r_standby").filter((x) => num2(x.replay_lag_s) >= 60 || num2(x.replay_bytes) >= GB);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.replay_lag_s) >= 300 || num2(x.replay_bytes) >= 10 * GB) ? "critical" : "warning",
@@ -2363,9 +2413,9 @@ var CHECKS_B = [
     looks: "Slots in use versus max_replication_slots.",
     flags: "Warning at 80%.",
     uses: ["r_slots"],
-    run: ({ rows: rows2, setting: setting2 }) => {
+    run: ({ rows: rows3, setting: setting2 }) => {
       const max = num2(setting2("max_replication_slots"));
-      const n = rows2("r_slots").length;
+      const n = rows3("r_slots").length;
       if (!max || n < 0.8 * max) return null;
       return { severity: "warning", title: `${n} of ${max} replication slots in use`, why: "At the limit, new replicas and logical subscriptions fail to start.", fix: "Drop unused slots or raise max_replication_slots (needs a restart)." };
     }
@@ -2377,8 +2427,8 @@ var CHECKS_B = [
     looks: "Share of checkpoints forced by WAL volume.",
     flags: "Warning when over half of 50+ checkpoints are forced.",
     uses: ["r_checkpoints"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("r_checkpoints")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("r_checkpoints")[0];
       if (!r) return null;
       const total = num2(r.timed) + num2(r.requested);
       return total >= 50 && num2(r.requested) / total > 0.5 ? {
@@ -2397,8 +2447,8 @@ var CHECKS_B = [
     looks: "The size of pg_wal versus max_wal_size.",
     flags: "Warning when pg_wal is over twice max_wal_size and 1 GB.",
     uses: ["r_waldir"],
-    run: ({ rows: rows2, setting: setting2 }) => {
-      const r = rows2("r_waldir")[0];
+    run: ({ rows: rows3, setting: setting2 }) => {
+      const r = rows3("r_waldir")[0];
       const max = num2(setting2("max_wal_size")) * 1024 * 1024;
       if (!r || !max) return null;
       return num2(r.bytes) > 2 * max && num2(r.bytes) > GB ? {
@@ -2417,8 +2467,8 @@ var CHECKS_B = [
     looks: "The most recent archive attempt.",
     flags: "Critical when the latest attempt failed.",
     uses: ["r_archiver"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("r_archiver")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("r_archiver")[0];
       if (!r || num2(r.failed_count) === 0) return null;
       return ts(r.last_failed_time) > ts(r.last_archived_time) ? {
         severity: "critical",
@@ -2437,8 +2487,8 @@ var CHECKS_B = [
     looks: "Tables with a large share of dead rows.",
     flags: "Warning at 20%+ (and 10k+ rows); critical at 50%+.",
     uses: ["v_dead"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("v_dead").filter((x) => num2(x.dead_rows) > 1e4 && num2(x.dead_pct) > 20);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("v_dead").filter((x) => num2(x.dead_rows) > 1e4 && num2(x.dead_pct) > 20);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.dead_pct) > 50) ? "critical" : "warning",
@@ -2465,8 +2515,8 @@ var CHECKS_B = [
     looks: "Tables with lots of writes that were never vacuumed.",
     flags: "Warning for any table with 10k+ writes and no vacuum.",
     uses: ["v_never"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("v_never");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("v_never");
       return r.length ? {
         severity: "warning",
         title: `${r.length} busy ${pl(r.length, "table has", "tables have")} never been vacuumed`,
@@ -2483,8 +2533,8 @@ var CHECKS_B = [
     looks: "Table XID age versus autovacuum_freeze_max_age.",
     flags: "Warning at 80%; critical at 95%.",
     uses: ["v_age"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("v_age").filter((x) => num2(x.pct) >= 80);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("v_age").filter((x) => num2(x.pct) >= 80);
       if (!r.length) return null;
       return {
         severity: r.some((x) => num2(x.pct) >= 95) ? "critical" : "warning",
@@ -2502,8 +2552,8 @@ var CHECKS_B = [
     looks: "The oldest transaction ID versus the ~2.1 billion limit.",
     flags: "Warning at 1.0 billion; critical at 1.5 billion.",
     uses: ["v_dbage"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("v_dbage");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("v_dbage");
       const w = Math.max(0, ...r.map((x) => num2(x.xid_age)));
       if (w < 1e9) return null;
       return {
@@ -2522,8 +2572,8 @@ var CHECKS_B = [
     looks: "The oldest MultiXact ID versus its limit.",
     flags: "Warning at 1.0 billion; critical at 1.5 billion.",
     uses: ["v_dbage"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("v_dbage");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("v_dbage");
       const w = Math.max(0, ...r.map((x) => num2(x.mxid_age)));
       if (w < 1e9) return null;
       return {
@@ -2590,7 +2640,7 @@ var CHECKS_B = [
     flags: "Info when off.",
     selfHosted: true,
     uses: ["cfg_version"],
-    run: ({ rows: rows2 }) => rows2("cfg_version")[0]?.data_checksums === "off" ? { severity: "info", title: "Data checksums are off", why: "Silent storage corruption goes undetected until it is read.", fix: "Enable with pg_checksums --enable (offline) or when initializing a new cluster." } : null
+    run: ({ rows: rows3 }) => rows3("cfg_version")[0]?.data_checksums === "off" ? { severity: "info", title: "Data checksums are off", why: "Silent storage corruption goes undetected until it is read.", fix: "Enable with pg_checksums --enable (offline) or when initializing a new cluster." } : null
   },
   {
     id: "config.shared_buffers_default",
@@ -2600,7 +2650,7 @@ var CHECKS_B = [
     flags: "Info when default and the database is over 2 GB.",
     selfHosted: true,
     uses: ["cfg_version"],
-    run: ({ rows: rows2, setting: setting2 }) => setting2("shared_buffers") === "16384" && num2(rows2("cfg_version")[0]?.db_bytes) > 2 * GB ? {
+    run: ({ rows: rows3, setting: setting2 }) => setting2("shared_buffers") === "16384" && num2(rows3("cfg_version")[0]?.db_bytes) > 2 * GB ? {
       severity: "info",
       title: "shared_buffers is at the 128 MB default",
       why: "A large database with a tiny cache reads from disk far more than needed.",
@@ -2614,7 +2664,7 @@ var CHECKS_B = [
     looks: "Default work_mem alongside heavy temp-file use.",
     flags: "Info when work_mem is 4 MB and over 1 GB was spilled.",
     uses: ["l_db"],
-    run: ({ rows: rows2, setting: setting2 }) => setting2("work_mem") === "4096" && num2(rows2("l_db")[0]?.temp_bytes) >= GB ? {
+    run: ({ rows: rows3, setting: setting2 }) => setting2("work_mem") === "4096" && num2(rows3("l_db")[0]?.temp_bytes) >= GB ? {
       severity: "info",
       title: "Queries spill over 1 GB to temp files with default work_mem",
       why: "Sorts and hashes are running on disk.",
@@ -2628,8 +2678,8 @@ var CHECKS_B = [
     looks: "The major version's end-of-life date.",
     flags: "Critical after end of life; warning within 180 days.",
     uses: ["cfg_version"],
-    run: ({ rows: rows2 }) => {
-      const v = rows2("cfg_version")[0];
+    run: ({ rows: rows3 }) => {
+      const v = rows3("cfg_version")[0];
       if (!v) return null;
       const s = eolStatus(num2(v.version_num));
       if (!s.date || s.daysLeft === null) return null;
@@ -2678,8 +2728,8 @@ var CHECKS_B = [
     looks: "Deadlocks since the stats reset.",
     flags: "Info for any; warning at 10+.",
     uses: ["l_db"],
-    run: ({ rows: rows2 }) => {
-      const n = num2(rows2("l_db")[0]?.deadlocks);
+    run: ({ rows: rows3 }) => {
+      const n = num2(rows3("l_db")[0]?.deadlocks);
       return n > 0 ? {
         severity: n >= 10 ? "warning" : "info",
         title: `${n} ${pl(n, "deadlock", "deadlocks")} since the stats reset`,
@@ -2695,8 +2745,8 @@ var CHECKS_B = [
     looks: "Rollbacks as a share of transactions.",
     flags: "Info at 20%+ (with 10k+ transactions).",
     uses: ["l_db"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("l_db")[0];
+    run: ({ rows: rows3 }) => {
+      const r = rows3("l_db")[0];
       return r && num2(r.rollback_pct) >= 20 && num2(r.commits) + num2(r.rollbacks) >= 1e4 ? {
         severity: "info",
         title: `${r.rollback_pct}% of transactions roll back`,
@@ -2712,7 +2762,7 @@ var CHECKS_B = [
     looks: "Checksum failures recorded by the database.",
     flags: "Critical for any.",
     uses: ["l_db"],
-    run: ({ rows: rows2 }) => num2(rows2("l_db")[0]?.checksum_failures) > 0 ? { severity: "critical", title: "Data checksum failures detected", why: "Storage returned corrupted pages.", fix: "Check hardware and storage, and restore affected data from a good backup." } : null
+    run: ({ rows: rows3 }) => num2(rows3("l_db")[0]?.checksum_failures) > 0 ? { severity: "critical", title: "Data checksum failures detected", why: "Storage returned corrupted pages.", fix: "Check hardware and storage, and restore affected data from a good backup." } : null
   },
   // ───────── Security
   {
@@ -2722,8 +2772,8 @@ var CHECKS_B = [
     looks: "Login roles with SUPERUSER, BYPASSRLS or REPLICATION (provider-managed roles ignored).",
     flags: "Info when there is more than one.",
     uses: ["s_roles"],
-    run: ({ ctx, rows: rows2 }) => {
-      const r = rows2("s_roles").filter((x) => x.login && (x.superuser || x.bypassrls || x.replication)).filter((x) => !ctx.profile.expectedAdmins.includes(String(x.role)));
+    run: ({ ctx, rows: rows3 }) => {
+      const r = rows3("s_roles").filter((x) => x.login && (x.superuser || x.bypassrls || x.replication)).filter((x) => !ctx.profile.expectedAdmins.includes(String(x.role)));
       const allowance = ctx.profile.expectedAdmins.length ? 0 : 1;
       return r.length > allowance ? {
         severity: "info",
@@ -2741,8 +2791,8 @@ var CHECKS_B = [
     looks: "Policies whose gating expression is always true, split by whether they allow writes or only reads.",
     flags: "Warning when a write (INSERT, UPDATE, DELETE, ALL) policy is always true. Info when only SELECT policies are, since public read access is normal for reference data.",
     uses: ["s_policies"],
-    run: ({ rows: rows2 }) => {
-      const all = rows2("s_policies").filter((x) => x.always_true);
+    run: ({ rows: rows3 }) => {
+      const all = rows3("s_policies").filter((x) => x.always_true);
       if (!all.length) return null;
       const writes = all.filter((x) => String(x.cmd).toUpperCase() !== "SELECT"), reads = all.filter((x) => String(x.cmd).toUpperCase() === "SELECT");
       if (writes.length) return {
@@ -2763,14 +2813,102 @@ var CHECKS_B = [
     }
   },
   {
+    id: "security.rls_per_row_calls",
+    section: "security",
+    title: "Policies avoid per-row function calls",
+    looks: "Policy expressions that call a stable or volatile function in the row filter itself, outside a scalar sub-select.",
+    flags: "Warning when the table has about 10,000 rows or more, info on smaller tables. Read from the expression text, so the finding is marked likely.",
+    uses: ["s_policy_calls"],
+    run: ({ rows: rows3 }) => {
+      const cheap = /* @__PURE__ */ new Set(["now", "statement_timestamp", "transaction_timestamp", "clock_timestamp", "timeofday"]);
+      const wrapped = /\(\s*SELECT\b(?![^()]*\bFROM\b)(?:[^()]|\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\))*\)/gi;
+      const hits = rows3("s_policy_calls").flatMap((r) => {
+        const vols = new Map(String(r.fn_vols ?? "").split(",").filter(Boolean).map((x) => [x.slice(0, x.lastIndexOf(":")), x.slice(x.lastIndexOf(":") + 1)]));
+        let text = String(r.expr ?? "");
+        for (let i = 0; i < 4; i++) text = text.replace(wrapped, " ");
+        const names = [...new Set([...text.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]).filter((n) => ["s", "v"].includes(vols.get(n) ?? "i") && !cheap.has(n)))];
+        return names.length ? [{ table: r.table, policy: r.policy, cmd: r.cmd, est_rows: r.est_rows, functions: names.join(", ") }] : [];
+      });
+      if (!hits.length) return null;
+      const big = hits.filter((h) => Number(h.est_rows) >= 1e4);
+      const t = new Set(hits.map((h) => h.table)).size;
+      return {
+        severity: big.length ? "warning" : "info",
+        title: `${hits.length} row-level security ${pl(hits.length, "policy calls", "policies call")} a function once per row on ${t} ${pl(t, "table", "tables")}`,
+        why: "PostgreSQL runs a stable or volatile function in a row filter once for every row it checks. Inside a scalar sub-select it runs once per query.",
+        fix: "Wrap the call: USING (owner_id = (SELECT my_fn())) instead of USING (owner_id = my_fn()). EXPLAIN should then show an InitPlan.",
+        evidence: top(big.length ? big : hits)
+      };
+    }
+  },
+  {
+    id: "security.rls_stacked_policies",
+    section: "security",
+    title: "Few policies stacked per table",
+    looks: "Tables where several permissive policies apply to the same role and command.",
+    flags: "Info for two or more, warning for five or more on one table, role and command.",
+    uses: ["s_policy_overlap"],
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_policy_overlap");
+      if (!r.length) return null;
+      const worst = Math.max(...r.map((x) => Number(x.policies)));
+      return {
+        severity: worst >= 5 ? "warning" : "info",
+        title: `${r.length} ${pl(r.length, "table has", "tables have")} several permissive policies for the same role and command`,
+        why: "Permissive policies are OR-ed together, and each one is evaluated for every row checked.",
+        fix: "Merge policies for the same role and command, or limit each one with TO role.",
+        evidence: top(r)
+      };
+    }
+  },
+  {
+    id: "security.rls_unindexed_columns",
+    section: "security",
+    title: "Policy columns are indexed",
+    looks: "Columns read by a policy on a table of about 10,000 rows or more with no index that starts with that column.",
+    flags: "Warning for any.",
+    uses: ["s_policy_unindexed"],
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_policy_unindexed");
+      if (!r.length) return null;
+      return {
+        severity: "warning",
+        title: `${r.length} ${pl(r.length, "column", "columns")} used in row-level security policies ${pl(r.length, "has", "have")} no index`,
+        why: "A policy adds its condition to every query on the table. Without an index on the column it compares, PostgreSQL reads and tests rows.",
+        fix: "Create an index on that column with CREATE INDEX CONCURRENTLY, then check the plan of a typical query.",
+        sql: r.slice(0, 5).map((x) => `CREATE INDEX CONCURRENTLY ON ${x.table} (${String(x.column).replace(/"/g, '""')});`).join("\n"),
+        evidence: top(r)
+      };
+    }
+  },
+  {
+    id: "security.rls_policy_lookups",
+    section: "security",
+    title: "Policies avoid lookups in other protected tables",
+    looks: "Policies that read another table that also has row-level security enabled.",
+    flags: "Info for any.",
+    uses: ["s_policy_lookups"],
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_policy_lookups").filter((x) => x.reads_rls);
+      if (!r.length) return null;
+      return {
+        severity: "info",
+        title: `${r.length} ${pl(r.length, "policy reads", "policies read")} a table that has row-level security of its own`,
+        why: "The lookup runs inside every query on this table, and the other table's policies run inside the lookup.",
+        fix: "Compare against a column on the same table, or use a narrow, indexed lookup function.",
+        evidence: top(r)
+      };
+    }
+  },
+  {
     id: "security.definer_search_path",
     section: "security",
     title: "SECURITY DEFINER functions pin search_path",
     looks: "SECURITY DEFINER functions without a fixed search_path.",
     flags: "Warning for any.",
     uses: ["s_definer"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("s_definer").filter((x) => !x.search_path_set);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_definer").filter((x) => !x.search_path_set);
       return r.length ? {
         severity: "warning",
         title: `${r.length} SECURITY DEFINER ${pl(r.length, "function has", "functions have")} no fixed search_path`,
@@ -2788,8 +2926,8 @@ var CHECKS_B = [
     flags: "Critical for any (Supabase).",
     providers: ["supabase"],
     uses: ["s_exposure"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("s_exposure");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_exposure");
       return r.length ? {
         severity: "critical",
         title: `${r.length} public ${pl(r.length, "table is", "tables are")} readable by anyone with the anon key`,
@@ -2807,8 +2945,8 @@ var CHECKS_B = [
     flags: "Critical for any.",
     selfHosted: true,
     uses: ["s_hba"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("s_hba").filter((x) => x.method === "trust" && x.address && !["127.0.0.1", "::1"].includes(String(x.address)));
+    run: ({ rows: rows3 }) => {
+      const r = rows3("s_hba").filter((x) => x.method === "trust" && x.address && !["127.0.0.1", "::1"].includes(String(x.address)));
       return r.length ? {
         severity: "critical",
         title: `${r.length} pg_hba rule${r.length > 1 ? "s allow" : " allows"} remote connections without a password`,
@@ -2857,8 +2995,8 @@ var CHECKS_B = [
     looks: "Installed extensions with a newer version available.",
     flags: "Info for any.",
     uses: ["e_installed"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("e_installed").filter((x) => x.update);
+    run: ({ rows: rows3 }) => {
+      const r = rows3("e_installed").filter((x) => x.update);
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "extension has", "extensions have")} an update available`,
@@ -2881,9 +3019,9 @@ var CHECKS_C = [
     flags: "Warning at 1 GB+ (info below); off means you can only restore to the last base backup, never a point in time.",
     selfHosted: true,
     uses: ["bk_archiving", "cfg_version"],
-    run: ({ rows: rows2 }) => {
-      const a = rows2("bk_archiving")[0];
-      const db = num3(rows2("cfg_version")[0]?.db_bytes);
+    run: ({ rows: rows3 }) => {
+      const a = rows3("bk_archiving")[0];
+      const db = num3(rows3("cfg_version")[0]?.db_bytes);
       if (!a) return null;
       if (a.wal_level === "minimal") return { severity: "warning", title: "wal_level is minimal: no point-in-time recovery or replication", why: "Minimal WAL can't be archived or streamed, so the only recovery is the last full backup.", fix: "Set wal_level = replica (restart), then enable archiving with a tool such as pgBackRest.", evidence: a };
       if (a.archive_mode !== "off") return null;
@@ -2898,8 +3036,8 @@ var CHECKS_C = [
     flags: "Critical when found.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows: rows2 }) => {
-      const a = rows2("bk_archiving")[0];
+    run: ({ rows: rows3 }) => {
+      const a = rows3("bk_archiving")[0];
       return a && String(a.tool).startsWith("no-op") ? { severity: "critical", title: "archive_command discards WAL (it always reports success)", why: "Postgres deletes each WAL segment once the command succeeds, so this silently destroys your recovery history.", fix: "Replace it with a real archiver (pgBackRest, WAL-G, Barman) that copies the file and exits non-zero on failure.", evidence: a } : null;
     }
   },
@@ -2911,8 +3049,8 @@ var CHECKS_C = [
     flags: "Warning at 10 segments behind; critical at 100.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows: rows2 }) => {
-      const a = rows2("bk_archiving")[0];
+    run: ({ rows: rows3 }) => {
+      const a = rows3("bk_archiving")[0];
       const n = num3(a?.segments_behind);
       if (!a || a.segments_behind === null || n < 10) return null;
       return { severity: n >= 100 ? "critical" : "warning", title: `${n} WAL segments are waiting to be archived`, why: "A growing backlog fills pg_wal and widens the data you'd lose. If it fills the disk, the server shuts down.", fix: "Check the archive command's output and destination, and monitor pg_stat_archiver.", evidence: a };
@@ -2926,8 +3064,8 @@ var CHECKS_C = [
     flags: "Info when 0 on a self-managed server.",
     selfHosted: true,
     uses: ["bk_archiving"],
-    run: ({ rows: rows2 }) => {
-      const a = rows2("bk_archiving")[0];
+    run: ({ rows: rows3 }) => {
+      const a = rows3("bk_archiving")[0];
       return a && a.archive_mode !== "off" && num3(a.archive_timeout_s) === 0 ? {
         severity: "info",
         title: "archive_timeout is 0: recent transactions can sit unarchived indefinitely",
@@ -2945,9 +3083,9 @@ var CHECKS_C = [
     flags: "Warning when replicas exist but nothing is archived.",
     selfHosted: true,
     uses: ["r_standby", "bk_archiving"],
-    run: ({ rows: rows2 }) => {
-      const s = rows2("r_standby");
-      const a = rows2("bk_archiving")[0];
+    run: ({ rows: rows3 }) => {
+      const s = rows3("r_standby");
+      const a = rows3("bk_archiving")[0];
       return s.length && a?.archive_mode === "off" ? {
         severity: "warning",
         title: `${s.length} ${pl(s.length, "replica", "replicas")} but no backup archive`,
@@ -2964,8 +3102,8 @@ var CHECKS_C = [
     looks: "Unlogged tables and custom tablespaces.",
     flags: "Info for any.",
     uses: ["bk_unprotected"],
-    run: ({ rows: rows2 }) => {
-      const r = rows2("bk_unprotected").filter((x) => x.kind === "Unlogged table" || x.kind === "Tablespace");
+    run: ({ rows: rows3 }) => {
+      const r = rows3("bk_unprotected").filter((x) => x.kind === "Unlogged table" || x.kind === "Tablespace");
       return r.length ? {
         severity: "info",
         title: `${r.length} ${pl(r.length, "object isn't", "objects aren't")} fully covered by backups`,
@@ -3378,7 +3516,7 @@ var CHECKS_D = [
     flags: "Info at 5 or more; warning at 20 or more, or when they are hours old with keepalives at the OS default.",
     uses: ["c_stale"],
     run: (x) => {
-      const rows2 = x.rows("c_stale"), n = rows2.reduce((a, r) => a + num4(r.sessions), 0), oldest = Math.max(0, ...rows2.map((r) => num4(r.oldest_idle_s)));
+      const rows3 = x.rows("c_stale"), n = rows3.reduce((a, r) => a + num4(r.sessions), 0), oldest = Math.max(0, ...rows3.map((r) => num4(r.oldest_idle_s)));
       if (n < 5) return null;
       const set = (name) => x.rows("c_timeouts").find((r) => r.name === name)?.setting;
       const osDefault = String(set("tcp_keepalives_idle") ?? "0") === "0";
@@ -3388,15 +3526,80 @@ var CHECKS_D = [
         why: "Idle is normal for a connection pool, but a client that crashed or lost its network leaves a session that looks identical. Postgres only notices when the operating system's keepalive fires, which defaults to two hours or more. Until then each one holds a connection slot and memory.",
         fix: "First check that they're dead, not pooled on purpose: compare with the application's pool size. Then make dead peers drop quickly: set tcp_keepalives_idle = 60, tcp_keepalives_interval = 10 and tcp_keepalives_count = 6, and on PostgreSQL 14+ set client_connection_check_interval = '10s' so running queries stop when the client has gone. Set your pool's idle timeout below the firewall's. idle_session_timeout (PostgreSQL 14+) also works, but it closes healthy idle connections too, so use it only if your clients reconnect cleanly.",
         sql: "-- self-managed servers (managed providers: set these in the dashboard's database settings)\nALTER SYSTEM SET tcp_keepalives_idle = 60;\nALTER SYSTEM SET tcp_keepalives_interval = 10;\nALTER SYSTEM SET tcp_keepalives_count = 6;\nALTER SYSTEM SET client_connection_check_interval = '10s';  -- PostgreSQL 14+\nSELECT pg_reload_conf();\n",
-        evidence: rows2.slice(0, 10)
+        evidence: rows3.slice(0, 10)
       };
     }
   }
 ];
 
-// src/fixes-stub.ts
-function fixSql(_id, _evidence) {
-  return void 0;
+// src/fixes.ts
+var qi = (s) => `"${s.replace(/"/g, '""')}"`;
+var one = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+var rel = (s) => {
+  const t = String(s ?? "");
+  const i = t.indexOf(".");
+  return i > 0 && i < t.length - 1 ? `${qi(t.slice(0, i))}.${qi(t.slice(i + 1))}` : null;
+};
+var schemaOf = (s) => {
+  const t = String(s ?? "");
+  const i = t.indexOf(".");
+  return i > 0 ? qi(t.slice(0, i)) : null;
+};
+var rows = (e) => Array.isArray(e) ? e : e ? [e] : [];
+var HEAD_INDEX = "-- CREATE/DROP INDEX CONCURRENTLY cannot run inside a transaction block: run each statement on its own (psql does this by default). They also wait for open transactions to finish, so end any long or idle-in-transaction sessions first.\n";
+var HEAD_LOCK = "-- Fails fast instead of queueing behind long transactions and blocking everyone else. Retry if it times out.\nSET lock_timeout = '5s';\n";
+var GEN = {
+  "extensions.cron_history": () => [
+    "-- one-off cleanup of old run history\ndelete from cron.job_run_details where end_time < now() - interval '7 days';",
+    "-- then keep it trimmed every night\nselect cron.schedule('purge-cron-history', '0 3 * * *', $$delete from cron.job_run_details where end_time < now() - interval '7 days'$$);"
+  ],
+  "indexes.invalid": (r) => r.flatMap((x) => {
+    const t = schemaOf(x.table);
+    return t && x.index ? [`DROP INDEX CONCURRENTLY IF EXISTS ${t}.${qi(String(x.index))};  -- then recreate it with CREATE INDEX CONCURRENTLY`] : [];
+  }),
+  "indexes.unused": (r) => r.flatMap((x) => {
+    const t = schemaOf(x.table);
+    return t && x.index ? [`-- undo: ${one(x.definition)}
+DROP INDEX CONCURRENTLY IF EXISTS ${t}.${qi(String(x.index))};`] : [];
+  }),
+  "indexes.redundant": (r) => r.flatMap((x) => {
+    const t = schemaOf(x.table);
+    return t && x.redundant ? [`-- covered by ${one(x.covered_by)}
+DROP INDEX CONCURRENTLY IF EXISTS ${t}.${qi(String(x.redundant))};`] : [];
+  }),
+  "indexes.duplicate": (r) => r.flatMap((x) => {
+    const t = schemaOf(x.table);
+    const names = String(x.indexes ?? "").split(", ").filter(Boolean);
+    return t && names.length > 1 ? [`-- keeping ${one(names[0])}; if a drop fails, that index backs a constraint, so keep it and drop the other
+${names.slice(1).map((n) => `DROP INDEX CONCURRENTLY IF EXISTS ${t}.${qi(n)};`).join("\n")}`] : [];
+  }),
+  "indexes.fk_without_index": (r) => r.flatMap((x) => {
+    const t = rel(x.table);
+    const m = /FOREIGN KEY \((.+?)\) REFERENCES/.exec(String(x.definition ?? ""));
+    return t && m ? [`CREATE INDEX CONCURRENTLY ON ${t} (${m[1]});  -- ${one(x.constraint)}`] : [];
+  }),
+  "schema.constraints_not_validated": (r) => r.flatMap((x) => {
+    const t = rel(x.table);
+    return t && x.constraint ? [`ALTER TABLE ${t} VALIDATE CONSTRAINT ${qi(String(x.constraint))};`] : [];
+  }),
+  "schema.disabled_triggers": (r) => r.flatMap((x) => {
+    const t = rel(x.table);
+    return t && x.trigger ? [`ALTER TABLE ${t} ENABLE TRIGGER ${qi(String(x.trigger))};`] : [];
+  }),
+  "tables.stale_statistics": (r) => r.flatMap((x) => {
+    const t = rel(x.table);
+    return t ? [`ANALYZE ${t};
+ALTER TABLE ${t} SET (autovacuum_analyze_scale_factor = 0.02);  -- re-analyze after ~2% of rows change`] : [];
+  })
+};
+var NEEDS_LOCK = /* @__PURE__ */ new Set(["schema.constraints_not_validated", "schema.disabled_triggers", "tables.stale_statistics"]);
+var NEEDS_INDEX_NOTE = /* @__PURE__ */ new Set(["indexes.invalid", "indexes.unused", "indexes.redundant", "indexes.duplicate", "indexes.fk_without_index"]);
+function fixSql(id, evidence) {
+  const gen = GEN[id];
+  if (!gen) return void 0;
+  const stmts = gen(rows(evidence));
+  if (!stmts.length) return void 0;
+  return (NEEDS_INDEX_NOTE.has(id) ? HEAD_INDEX : "") + (NEEDS_LOCK.has(id) ? HEAD_LOCK : "") + stmts.join("\n\n") + "\n";
 }
 
 // src/triage.ts
@@ -3422,7 +3625,7 @@ var HORIZON_MIN = 1e5;
 function triage(input, datasets, vitals = []) {
   const fs = input.map(({ priority: _p, cause: _c, note: _n, confidence: _k, ...f }) => ({ ...f, priority: DEFAULT[f.severity] ?? "watch" }));
   const by = (id) => fs.find((f) => f.id === id);
-  const rows2 = (id) => datasets.find((d) => d.id === id)?.rows ?? [];
+  const rows3 = (id) => datasets.find((d) => d.id === id)?.rows ?? [];
   const notes = /* @__PURE__ */ new Map();
   const note = (f, s) => notes.set(f.id, [...notes.get(f.id) ?? [], s]);
   const rank = (p) => PRIORITIES.indexOf(p);
@@ -3432,19 +3635,19 @@ function triage(input, datasets, vitals = []) {
     effect.confidence = confidence;
     if (rank(cause.priority) > rank(effect.priority)) cause.priority = effect.priority;
   };
-  const deadPct = new Map(rows2("v_dead").map((r) => [String(r.table), num5(r.dead_pct)]));
+  const deadPct = new Map(rows3("v_dead").map((r) => [String(r.table), num5(r.dead_pct)]));
   const dead = by("vacuum.dead_tuples");
   const deadTables = tablesIn(dead);
-  const top2 = rows2("b_xmin")[0];
+  const top2 = rows3("b_xmin")[0];
   const horizon = by("blocking.vacuum_horizon");
   let holder;
   if (top2 && (horizon || num5(top2.xmin_age) >= HORIZON_MIN)) {
     const ref = String(top2.ref ?? "");
-    const pidIn = (id) => rows2(id).some((r) => String(r.pid) === ref);
+    const pidIn = (id) => rows3(id).some((r) => String(r.pid) === ref);
     const session = top2.holder === "Backend session";
     holder = (session && pidIn("b_idle") ? by("blocking.idle_in_transaction") : void 0) ?? (session && pidIn("b_running") ? by("blocking.long_running_queries") : void 0) ?? (top2.holder === "Prepared transaction" ? by("blocking.prepared_transactions") : void 0) ?? (top2.holder === "Replication slot" ? by("replication.bad_slots") : void 0) ?? horizon;
   }
-  const who = !top2 ? "" : top2.holder === "Backend session" ? rows2("b_idle").some((r) => String(r.pid) === String(top2.ref)) ? `the session idle in a transaction (PID ${top2.ref})` : rows2("b_running").some((r) => String(r.pid) === String(top2.ref)) ? `the query running as PID ${top2.ref}` : `the transaction in PID ${top2.ref}` : top2.holder === "Prepared transaction" ? `the prepared transaction ${top2.ref}` : top2.holder === "Replication slot" ? `the replication slot ${top2.ref}` : `the standby ${top2.ref}`;
+  const who = !top2 ? "" : top2.holder === "Backend session" ? rows3("b_idle").some((r) => String(r.pid) === String(top2.ref)) ? `the session idle in a transaction (PID ${top2.ref})` : rows3("b_running").some((r) => String(r.pid) === String(top2.ref)) ? `the query running as PID ${top2.ref}` : `the transaction in PID ${top2.ref}` : top2.holder === "Prepared transaction" ? `the prepared transaction ${top2.ref}` : top2.holder === "Replication slot" ? `the replication slot ${top2.ref}` : `the standby ${top2.ref}`;
   const effects = HOLDS_VACUUM.map(by).filter((f) => Boolean(f));
   if (holder && effects.length) {
     holder.priority = "now";
@@ -3490,10 +3693,10 @@ function triage(input, datasets, vitals = []) {
   }
   const blocked = by("blocking.lock_waits");
   if (blocked) {
-    const bl = rows2("b_blocked");
+    const bl = rows3("b_blocked");
     const idle = by("blocking.idle_in_transaction"), running = by("blocking.long_running_queries");
     const fromIdle = bl.find((r) => r.blocking_state === "idle in transaction");
-    const fromRunning = bl.find((r) => rows2("b_running").some((x) => String(x.pid) === String(r.blocking_pid)));
+    const fromRunning = bl.find((r) => rows3("b_running").some((x) => String(x.pid) === String(r.blocking_pid)));
     if (fromIdle && idle) {
       link(idle, blocked);
       note(blocked, `The blocking session (PID ${fromIdle.blocking_pid}) is idle in a transaction. Ending that transaction releases the lock.`);
@@ -3505,7 +3708,7 @@ function triage(input, datasets, vitals = []) {
   }
   const sat = by("connections.saturation");
   if (sat) {
-    const c = rows2("c_limits")[0];
+    const c = rows3("c_limits")[0];
     const idleConns = by("connections.idle_sessions");
     if (blocked) {
       link(blocked, sat);
@@ -3532,7 +3735,7 @@ function triage(input, datasets, vitals = []) {
       note(f, "The statements writing the temp files are in the queries finding listed before this one. Raise work_mem only for the roles that run them: a global increase applies to every sort in every connection.");
     }
   }
-  const reset = rows2("l_db")[0]?.stats_reset;
+  const reset = rows3("l_db")[0]?.stats_reset;
   const uptime = vitals.find((v) => v.label === "Uptime")?.value;
   const windowS = reset ? (Date.now() - new Date(String(reset)).getTime()) / 1e3 : typeof uptime === "number" ? uptime : null;
   const unused = by("indexes.unused");
@@ -3570,8 +3773,8 @@ async function evaluate(def, ctx, byId) {
     if (d.error) return skip(`Couldn't read ${d.title.toLowerCase()}: ${d.error}`);
     if (d.note) return skip(d.note);
   }
-  const rows2 = (id) => byId[id]?.rows ?? [];
-  const x = { ctx, d: byId, rows: rows2, setting: (name) => {
+  const rows3 = (id) => byId[id]?.rows ?? [];
+  const x = { ctx, d: byId, rows: rows3, setting: (name) => {
     for (const d of Object.values(byId)) for (const r of d.rows) if (r.name === name && "setting" in r) return String(r.setting);
   } };
   try {
@@ -3868,14 +4071,18 @@ var BETTER = { "Cache hit rate": "higher", Connections: "lower", Deadlocks: "low
 var moved = (before, after) => before !== null && after !== null && after !== before && Math.abs(after - before) >= Math.max(5e-3 * Math.abs(before), 1e-9);
 var slim = (f) => ({ id: f.id, title: f.title, severity: f.severity });
 var num6 = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
-var rows = (b, id) => b.datasets.find((d) => d.id === id)?.rows ?? [];
+var rows2 = (b, id) => b.datasets.find((d) => d.id === id)?.rows ?? [];
 var hours = (ms) => Math.round(ms / 36e4) / 10;
 function window(b) {
   const at = Date.parse(b.collectedAt);
-  const reset = rows(b, "l_db")[0]?.stats_reset;
+  const reset = rows2(b, "l_db")[0]?.stats_reset;
   if (reset && Date.parse(String(reset))) return hours(at - Date.parse(String(reset)));
   const up = num6(b.vitals?.uptime_s);
   return up === null ? null : hours(up * 1e3);
+}
+function unavailableOrCapped(b) {
+  const d = b.datasets.find((d2) => d2.id === "v_dead");
+  return !d || Boolean(d.error || d.note || d.capped);
 }
 function compareCheckups(a, b) {
   const was = new Map(a.findings.map((f) => [f.id, f])), now = new Map(b.findings.map((f) => [f.id, f]));
@@ -3892,8 +4099,8 @@ function compareCheckups(a, b) {
   }).filter((n) => n.before !== null || n.after !== null);
   const named = /* @__PURE__ */ new Set();
   for (const f of [...a.findings, ...b.findings]) for (const e of Array.isArray(f.evidence) ? f.evidence : f.evidence ? [f.evidence] : []) if (typeof e.table === "string") named.add(e.table);
-  const deadB = new Map(rows(a.bundle, "v_dead").map((r) => [String(r.table), r])), deadA = new Map(rows(b.bundle, "v_dead").map((r) => [String(r.table), r]));
-  const cappedB = a.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true, cappedA = b.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true;
+  const deadB = new Map(rows2(a.bundle, "v_dead").map((r) => [String(r.table), r])), deadA = new Map(rows2(b.bundle, "v_dead").map((r) => [String(r.table), r]));
+  const cappedB = unavailableOrCapped(a.bundle), cappedA = unavailableOrCapped(b.bundle);
   const dead = (m, capped, t, key) => m.has(t) ? num6(m.get(t)[key]) : capped ? null : 0;
   const tables = [...new Set([...named].filter((t) => deadB.has(t) || deadA.has(t)))].map((table) => ({
     table,
@@ -3902,7 +4109,7 @@ function compareCheckups(a, b) {
     pctBefore: dead(deadB, cappedB, table, "dead_pct"),
     pctAfter: dead(deadA, cappedA, table, "dead_pct")
   })).sort((x, y) => (y.deadBefore ?? 0) - (x.deadBefore ?? 0)).slice(0, 10);
-  const resetAt = rows(b.bundle, "l_db")[0]?.stats_reset;
+  const resetAt = rows2(b.bundle, "l_db")[0]?.stats_reset;
   const statsReset = Boolean(resetAt && Date.parse(String(resetAt)) > Date.parse(a.bundle.collectedAt));
   const sameDatabase = a.bundle.target && b.bundle.target ? a.bundle.target === b.bundle.target : null;
   const wh = { before: window(a.bundle), after: window(b.bundle) };
@@ -3989,7 +4196,6 @@ import { Command, CommanderError, InvalidArgumentError, Option } from "commander
 var UsageError = class extends Error {
 };
 var PROVIDERS2 = ["generic", "supabase", "neon"];
-var GOALS = ["performance", "resize", "readiness", "incident"];
 var SEVERITIES = ["critical", "warning", "info"];
 var isUrl = (s) => /^postgres(ql)?:\/\//.test(s);
 var integer = (lo, hi) => (v) => {
@@ -4032,7 +4238,7 @@ function toOptions(o) {
     out2[names[k] ?? k] = v;
   }
   if (out2.md && out2.json) throw new UsageError("--md and --json cannot be combined.");
-  if (out2.json && out2.upload) throw new UsageError("--json and --upload cannot be combined; upload the saved file separately.");
+  if (out2.json && (out2.upload || out2.send)) throw new UsageError("--json cannot be combined with --upload or --send; upload the saved file separately.");
   return out2;
 }
 var AFTER = `
@@ -4054,7 +4260,7 @@ function buildProgram(version, record, quiet = false) {
   }, writeErr: () => {
   } });
   const done = (command, positionals2, cmd2) => record({ command, positionals: positionals2, options: toOptions(cmd2.optsWithGlobals()) });
-  reading(connection(program.command("scan", { isDefault: true }).description("run the checkup and save the statistics to a file (the default)"))).option("--include-query-text", "keep SQL text in the file, with literals masked").option("--upload", "upload the saved file afterwards, for a shareable report").addOption(new Option("--no-upload").hideHelp()).addOption(new Option("--goal <goal>", "with --upload: which decision report to open").choices(GOALS)).action((conn, _o, cmd2) => {
+  reading(connection(program.command("scan", { isDefault: true }).description("run the checkup and save the statistics to a file (the default)"))).option("--include-query-text", "keep SQL text in the file, with literals masked").option("--upload", "upload the saved file afterwards, for a shareable report").option("--send <code>", "upload for the page that is waiting, with the one-time code shown on pgcheckup.com/scan").addOption(new Option("--no-upload").hideHelp()).action((conn, _o, cmd2) => {
     if (conn !== void 0 && !isUrl(conn)) throw new UsageError(`unknown command "${conn}". A connection is a postgres:// URL; run pg-checkup --help for the commands.`);
     done("scan", conn ? [conn] : [], cmd2);
   });
@@ -4062,7 +4268,8 @@ function buildProgram(version, record, quiet = false) {
   connection(program.command("doctor").description("say how pg-checkup would connect and what the login can do, then stop")).action((conn, _o, cmd2) => done("doctor", conn ? [conn] : [], cmd2));
   program.command("role").description("print SQL that creates a statistics-only login").action((_o, cmd2) => done("role", [], cmd2));
   program.command("sql").description("print every query the checkup runs, in order").addOption(new Option("--provider <provider>", "the queries as run for this provider").choices(PROVIDERS2)).action((_o, cmd2) => done("sql", [], cmd2));
-  program.command("upload").description("send a saved file to pgcheckup.com for a shareable report").argument("<file>").addOption(new Option("--goal <goal>", "which decision report to open").choices(GOALS)).option("-y, --yes", "upload without asking").action((file, _o, cmd2) => done("upload", [file], cmd2));
+  program.command("schedule").description("print a ready-made schedule (GitHub Actions, or a cron line) that runs the checkup and uploads it").addOption(new Option("--every <interval>", "how often").choices(["daily", "weekly"]).default("weekly")).option("--cron", "print a crontab line instead of a GitHub Actions file").option("--write", "write .github/workflows/pg-checkup.yml (never overwrites)").action((_o, cmd2) => done("schedule", [], cmd2));
+  program.command("upload").description("send a saved file to pgcheckup.com for a shareable report").argument("<file>").option("-y, --yes", "upload without asking").action((file, _o, cmd2) => done("upload", [file], cmd2));
   program.command("delete").description("remove an uploaded report").argument("<receipt>", "the receipt file written by upload").action((receipt, _o, cmd2) => done("delete", [receipt], cmd2));
   connection(program.command("baseline").description("save schema, security and settings before a migration")).action((conn, _o, cmd2) => done("baseline", conn ? [conn] : [], cmd2));
   connection(program.command("verify").description("explain what differs after the migration").argument("<baseline>", "file written by baseline").argument("[after]", "a second baseline file")).action((baseline, after, conn, cmd2) => done("verify", [baseline, ...after ? [after] : [], ...conn ? [conn] : []], cmd2));
@@ -4144,14 +4351,14 @@ function deltas(w) {
   const families = /* @__PURE__ */ new Map();
   for (const end of w.end.counters) {
     const start = before.get(end.key);
-    const calls = end.calls - (start?.calls ?? 0), ms = end.ms - (start?.ms ?? 0), rows2 = end.rows - (start?.rows ?? 0);
-    if (calls < 0 || ms < 0 || rows2 < 0 || start && (start.family !== end.family || start.since !== end.since)) {
+    const calls = end.calls - (start?.calls ?? 0), ms = end.ms - (start?.ms ?? 0), rows3 = end.rows - (start?.rows ?? 0);
+    if (calls < 0 || ms < 0 || rows3 < 0 || start && (start.family !== end.family || start.since !== end.since)) {
       reasons.push("A query counter reset or its representative text changed.");
       continue;
     }
     if (!calls) continue;
     const old = families.get(end.family) ?? { calls: 0, ms: 0, rows: 0 };
-    families.set(end.family, { calls: old.calls + calls, ms: old.ms + ms, rows: old.rows + rows2 });
+    families.set(end.family, { calls: old.calls + calls, ms: old.ms + ms, rows: old.rows + rows3 });
   }
   return { families, reasons };
 }
@@ -4196,6 +4403,45 @@ function workloadText(c) {
   if (!c.comparable) return ["COMPARISON INCONCLUSIVE", ...c.reasons.map((r) => `  \u2022 ${r}`), "", "Next: observe the same workload for the same duration after traffic and caches settle."].join("\n");
   return ["WORKLOAD COMPARISON", ...c.queries.map((q) => `  ${q.status.toUpperCase().padEnd(8)} ${q.family.slice(0, 12)}  ${q.beforeMs.toFixed(2)} \u2192 ${q.afterMs.toFixed(2)} ms/call (${q.changePct >= 0 ? "+" : ""}${q.changePct.toFixed(1)}%)  ${q.beforeCalls}/${q.afterCalls} calls`), "", ...c.notes].join("\n");
 }
+
+// src/schedule.ts
+var CRON = { daily: "17 6 * * *", weekly: "17 6 * * 1" };
+var WHEN = { daily: "every day at 06:17 UTC", weekly: "every Monday at 06:17 UTC" };
+function githubWorkflow(every = "weekly") {
+  return `# Runs pg-checkup ${WHEN[every]} and uploads the statistics file to your pgcheckup.com account.
+# Secrets (Settings, Secrets and variables, Actions):
+#   DATABASE_URL     a statistics-only login (pg-checkup role prints the SQL to create one)
+#   PGCHECKUP_TOKEN  from Settings on pgcheckup.com; it can only add reports to your account
+name: pg-checkup
+on:
+  schedule:
+    - cron: "${CRON[every]}"
+  workflow_dispatch:
+jobs:
+  checkup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run the checkup and upload it
+        env:
+          DATABASE_URL: \${{ secrets.DATABASE_URL }}
+          PGCHECKUP_TOKEN: \${{ secrets.PGCHECKUP_TOKEN }}
+        run: |
+          npx --yes pg-checkup --no-input --no-pace --no-color -o checkup.json
+          npx --yes pg-checkup upload checkup.json --yes --no-input
+`;
+}
+function crontabLine(every = "weekly") {
+  const f = CRON[every].split(" ");
+  return `${f.join(" ")} cd "$(mktemp -d)" && npx --yes pg-checkup --no-input --no-pace --no-color -o checkup.json && npx --yes pg-checkup upload checkup.json --yes --no-input`;
+}
+var SCHEDULE_NOTES = (target) => [
+  `Your connection string stays in ${target === "github" ? "your repository's secrets" : "this machine's environment"}. pgcheckup.com receives only the statistics file, and only through the token.`,
+  `Each upload is compared with the previous one for the same database, so the report shows what was fixed, what is new, and what is getting worse.`,
+  target === "github" ? `GitHub-hosted runners have changing IP addresses. If your database only allows listed addresses, use a self-hosted runner inside your network.` : `The machine running this must be able to reach the database.`
+];
 
 // src/collector-cli.ts
 var parsed = (() => {
@@ -4275,7 +4521,7 @@ function load(file) {
     throw e;
   }
   if (size > MAX_BUNDLE_BYTES) throw new Error("File exceeds the 3 MB inspection limit.");
-  const text = readFileSync3(file, "utf8");
+  const text = readFileSync2(file, "utf8");
   try {
     return { text, value: JSON.parse(text) };
   } catch {
@@ -4343,7 +4589,7 @@ function wrap(text, pad = 4, first = pad) {
   return lines;
 }
 var para = (text, pad = 4, first = pad) => wrap(text, pad, first).forEach((l) => out(l));
-var plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+var plural = (n, one2, many = one2 + "s") => `${n} ${n === 1 ? one2 : many}`;
 var SEV_RANK = ["critical", "warning", "info"];
 async function printReport(r, b, file) {
   const findings = r.findings;
@@ -4354,7 +4600,7 @@ async function printReport(r, b, file) {
   const na = r.checks.length - active.length;
   const version = b.server.version.split(" on ")[0].split(",")[0];
   const sev = SEV_RANK.map((x) => count(x)).some(Boolean) ? SEV_RANK.filter((x) => count(x)).map((x) => ink(SEV_INK[x], `${count(x)} ${x}`)).join(dim(" \xB7 ")) : ink(32, "nothing flagged");
-  out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ""}  ${dim(`${active.length} checks:`)} ${sev}`);
+  out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ""}  ${sev}`);
   const step = Math.min(450, Math.round(5e3 / Math.max(findings.length, 1)));
   if (findings.length > 1) out(`${dim("Start here:")} ${findings[0].title}`);
   const limited = evidenceWindowHours(b);
@@ -4386,9 +4632,9 @@ async function printReport(r, b, file) {
   }
   if (!b.session.monitor) out(dim(`${b.session.role} is not in pg_monitor, so other sessions' activity may be missing.`));
   if (file) {
-    const rows2 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
+    const rows3 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
     out();
-    out(`Saved ${file}: ${rows2} rows of statistics and catalog metadata, ${b.queryText === "removed" ? "no SQL text" : "SQL text with literals masked"}, no table data. Object and role names are in it; read it before sharing.`);
+    out(`Saved ${file}: ${rows3} rows of statistics and catalog metadata, ${b.queryText === "removed" ? "no SQL text" : "SQL text with literals masked"}, no table data. Object and role names are in it; read it before sharing.`);
     out(`  every row:                   pg-checkup show ${quote(file)} --all`);
     out(`  did a fix work:              pg-checkup compare EARLIER.json ${quote(file)}`);
     out(`  shareable report, fix SQL:   pg-checkup upload ${quote(file)}   (sends this file to ${HOST}, nothing else)`);
@@ -4447,15 +4693,18 @@ async function upload(text, file) {
   validateDestination(SITE);
   const token = process.env.PGCHECKUP_TOKEN?.trim();
   const b = parseBundle(JSON.parse(text));
-  const rows2 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
-  say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows2} rows of statistics, ${b.queryText === "removed" ? "no SQL text" : "masked SQL text"}, no table data) to ${HOST}.`);
+  const rows3 = b.datasets.reduce((n, d) => n + d.rows.length, 0);
+  say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows3} rows of statistics, ${b.queryText === "removed" ? "no SQL text" : "masked SQL text"}, no table data) to ${HOST}.`);
+  const code = opt("send");
+  if (code !== void 0 && !/^[a-f0-9]{32}$/.test(code)) throw new Error("--send needs the code shown on pgcheckup.com/scan. Copy the whole command from the page.");
   say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). On the plan it is a full report with fix SQL, kept, and compared with your last checkup of this database.` : `You get the same findings as a shareable web page with the evidence tables. Kept 7 days under an unguessable link; anyone with the link can read it. "pg-checkup delete" removes it. Set PGCHECKUP_TOKEN (Settings on the site) to save it to your account.`);
-  if (!await confirm("Upload? [y/N] ")) {
+  if (code) say("Sending it because you passed --send; the page that showed the code opens the report.");
+  else if (!await confirm("Upload? [y/N] ")) {
     say("Not uploaded.");
     return;
   }
   say(`Uploading\u2026`);
-  const res = await fetch(`${SITE}/api/bundle`, { method: "POST", headers: { "content-type": "application/json", ...token ? { authorization: `Bearer ${token}` } : {} }, body: text, signal: AbortSignal.timeout(6e4), redirect: "error" });
+  const res = await fetch(`${SITE}/api/bundle`, { method: "POST", headers: { "content-type": "application/json", ...token ? { authorization: `Bearer ${token}` } : {}, ...code ? { "x-pgcheckup-handoff": code } : {} }, body: text, signal: AbortSignal.timeout(6e4), redirect: "error" });
   const r = await res.json();
   if (!res.ok || !r.url || !r.id || !r.key) throw new Error(`Upload refused: ${r.error ?? res.status}. Your local file is unchanged.`);
   if (new URL(r.url).origin !== new URL(SITE).origin) throw new Error("The server returned a report on a different origin. Check PGCHECKUP_URL.");
@@ -4463,7 +4712,6 @@ async function upload(text, file) {
   writeFileSync(receipt, json({ report: r.url, id: r.id, deleteKey: r.key, sha256: sha(text), uploadedAt: (/* @__PURE__ */ new Date()).toISOString() }), { flag: "wx", mode: 384 });
   if (r.sha256 !== sha(text)) throw new Error(`The server's hash does not match your file. Treat the upload as unverified: pg-checkup delete ${quote(receipt)} removes it.`);
   const report = new URL(r.url);
-  if (opt("goal")) report.searchParams.set("goal", opt("goal"));
   if (flag("json")) out(json({ report: String(report), receipt, sha256: r.sha256, ...r.account ? { account: r.account, full: Boolean(r.full) } : {} }));
   else {
     out(`Report:  ${report}`);
@@ -4495,7 +4743,7 @@ async function scan() {
   });
   if (process.stderr.isTTY && !flag("json")) process.stderr.write("\r\x1B[K");
   say(`Connected ${tls ? verified ? "with TLS, certificate verified" : "with TLS, certificate not verified" : "without TLS"}${allowPrivilegedRole ? ", privileged-role check skipped" : ""}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1e3).toFixed(1)} s`);
-  if (tls && !verified && !local) say(`The server's certificate is not signed by a CA this machine trusts. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
+  if (tls && !verified && !local) say(`Certificate verification is disabled for this connection. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
   if (flag("include-query-text")) say("SQL text is kept with literals masked. Comments and identifiers can still be sensitive; read the file before sharing.");
   const saved = save(b, `pg-checkup-${safeName(c.database)}`, c.password);
   const r = await analyze(b, { provider: provider2 });
@@ -4512,7 +4760,7 @@ async function scan() {
   }
   out();
   await printReport(r, b, saved.file);
-  if (flag("upload")) {
+  if (flag("upload") || opt("send")) {
     out();
     await upload(saved.text, saved.file);
   }
@@ -4521,6 +4769,24 @@ async function scan() {
 async function main() {
   if (cmd === "role") {
     out(MONITOR_ROLE_SQL);
+    return 0;
+  }
+  if (cmd === "schedule") {
+    const every = opt("every") === "daily" ? "daily" : "weekly";
+    if (flag("cron")) {
+      out(crontabLine(every));
+      for (const n of SCHEDULE_NOTES("cron")) say(n);
+      return 0;
+    }
+    const yaml = githubWorkflow(every);
+    if (flag("write")) {
+      const path = ".github/workflows/pg-checkup.yml";
+      if (existsSync(path)) throw new Error(`${path} already exists; it was not changed.`);
+      mkdirSync(".github/workflows", { recursive: true });
+      writeFileSync(path, yaml, { flag: "wx" });
+      say(`Wrote ${path}. Add the two secrets it lists, commit it, and run it once from the Actions tab.`);
+    } else out(yaml);
+    for (const n of SCHEDULE_NOTES("github")) say(n);
     return 0;
   }
   if (cmd === "sql") {

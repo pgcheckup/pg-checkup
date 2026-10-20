@@ -19,6 +19,7 @@
     "source/src/checkup-compare.ts",
     "source/src/cli-options.ts",
     "source/src/workload.ts",
+    "source/src/schedule.ts",
     "source/src/collector-cli.ts",
     "source/src/types.ts"
   ],
@@ -28,7 +29,7 @@
     "checks_b.ts",
     "checks_c.ts",
     "checks_d.ts",
-    "fixes-stub.ts",
+    "fixes.ts",
     "triage.ts",
     "analyze.ts"
   ]

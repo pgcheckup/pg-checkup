@@ -49,6 +49,12 @@ function window(b: Bundle): number | null {
   return up === null ? null : hours(up * 1000);
 }
 
+// Failed or skipped views cannot establish that an absent row has a zero count.
+function unavailableOrCapped(b: Bundle): boolean {
+  const d = b.datasets.find((d) => d.id === "v_dead");
+  return !d || Boolean(d.error || d.note || d.capped);
+}
+
 export function compareCheckups(a: Checkup, b: Checkup): CheckupComparison {
   const was = new Map(a.findings.map((f) => [f.id, f])), now = new Map(b.findings.map((f) => [f.id, f]));
   const passed = new Set(b.checks.filter((c) => c.status === "passed").map((c) => c.id));
@@ -69,7 +75,7 @@ export function compareCheckups(a: Checkup, b: Checkup): CheckupComparison {
   for (const f of [...a.findings, ...b.findings]) for (const e of Array.isArray(f.evidence) ? f.evidence : f.evidence ? [f.evidence] : []) if (typeof e.table === "string") named.add(e.table);
   // The dead-row view lists tables with dead rows, most first, capped. A table missing from an uncapped list has none.
   const deadB = new Map(rows(a.bundle, "v_dead").map((r) => [String(r.table), r])), deadA = new Map(rows(b.bundle, "v_dead").map((r) => [String(r.table), r]));
-  const cappedB = a.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true, cappedA = b.bundle.datasets.find((d) => d.id === "v_dead")?.capped ?? true;
+  const cappedB = unavailableOrCapped(a.bundle), cappedA = unavailableOrCapped(b.bundle);
   const dead = (m: Map<string, Record<string, unknown>>, capped: boolean, t: string, key: string) => (m.has(t) ? num(m.get(t)![key]) : capped ? null : 0);
   const tables: TableRow[] = [...new Set([...named].filter((t) => deadB.has(t) || deadA.has(t)))].map((table) => ({
     table, deadBefore: dead(deadB, cappedB, table, "dead_rows"), deadAfter: dead(deadA, cappedA, table, "dead_rows"), pctBefore: dead(deadB, cappedB, table, "dead_pct"), pctAfter: dead(deadA, cappedA, table, "dead_pct"),

@@ -1,7 +1,6 @@
 // The collector: connects read-only, checks the role, and reads statistics and catalog metadata into a bundle.
 // It never imports the checks, so it can be published on its own and read in full.
 import net from "node:net";
-import { readFileSync } from "node:fs";
 import pg from "pg";
 import type { Ctx, ScanOptions } from "./types.js";
 import type { ProviderId } from "./provider.js";
@@ -31,40 +30,29 @@ const pinned = (address: string) => () => {
 };
 const base = (connectionString: string, address?: string): pg.ClientConfig => ({ connectionString, statement_timeout: 15_000, connectionTimeoutMillis: 10_000, application_name: "pg-checkup", ...(address ? { stream: pinned(address) } : {}) });
 
-/** Errors that mean the server's certificate chain could not be verified, as opposed to any other failure. */
-const CERT_ERRORS = /SELF_SIGNED|UNABLE_TO_VERIFY|UNABLE_TO_GET_ISSUER|DEPTH_ZERO|CERT_HAS_EXPIRED|ERR_TLS_CERT_ALTNAME_INVALID|certificate/i;
-
-/**
- * node-postgres sends NO TLS unless asked. For a remote host with no explicit sslmode: TLS with the certificate
- * verified (the system's trusted CAs, plus PGSSLROOTCERT if set); if the chain cannot be verified, TLS without
- * verification, reported as such; plaintext only if the server refuses TLS. That matches libpq's "prefer" while
- * verifying whenever the certificate allows it. An explicit sslmode in the URL is always honoured as written:
- * verify-full and verify-ca verify and never fall back.
- */
+/** Remote connections require verified TLS unless the caller explicitly selects another mode. */
 async function connect(url: string, local: boolean, address?: string): Promise<{ db: pg.Client; tls: boolean; verified: boolean }> {
   const u = new URL(url);
   const explicit = u.searchParams.has("sslmode") || u.searchParams.has("ssl");
-  if (local || explicit) {
-    const db = new pg.Client(base(url, address)); db.on("error", () => {}); await db.connect();
-    const mode = u.searchParams.get("sslmode") ?? "";
-    const tls = explicit ? !/^(disable|allow)$/.test(mode) : false;
-    return { db, tls, verified: tls && /^verify-(ca|full)$/.test(mode) };
+  if (!local && !explicit) u.searchParams.set("sslmode", "verify-full");
+  // Put the CA in the URL because node-postgres URL options override the ssl config object. A bare sslrootcert turns
+  // TLS on, so a local connection with no sslmode of its own must not get one.
+  const mode = u.searchParams.get("sslmode");
+  const tlsWanted = mode ? mode !== "disable" : !local && u.searchParams.get("ssl") !== "0";
+  if (process.env.PGSSLROOTCERT && !u.searchParams.has("sslrootcert") && tlsWanted) {
+    u.searchParams.set("sslrootcert", process.env.PGSSLROOTCERT);
   }
-  let ca: string | undefined;
-  if (process.env.PGSSLROOTCERT) { try { ca = readFileSync(process.env.PGSSLROOTCERT, "utf8"); } catch { /* fall through to the system store */ } }
-  const verified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: true, ...(ca ? { ca } : {}) } });
-  verified.on("error", () => {});
-  try { await verified.connect(); return { db: verified, tls: true, verified: true }; }
-  catch (e: any) {
-    if (/does not support SSL/i.test(String(e.message))) {
-      const plain = new pg.Client(base(url, address)); plain.on("error", () => {}); await plain.connect();
-      return { db: plain, tls: false, verified: false };
-    }
-    if (!CERT_ERRORS.test(`${e.code ?? ""} ${e.message ?? ""}`)) throw e;
-    const unverified = new pg.Client({ ...base(url, address), ssl: { rejectUnauthorized: false } });
-    unverified.on("error", () => {});
-    await unverified.connect();
-    return { db: unverified, tls: true, verified: false };
+  let db: pg.Client;
+  try { db = new pg.Client(base(u.toString(), address)); }
+  catch (e) { throw new Error(`Could not set up the connection: ${(e as Error).message}. If PGSSLROOTCERT is set, check that the file exists and is readable.`); }
+  db.on("error", () => {});
+  try {
+    await db.connect();
+    const ssl = db.ssl as boolean | { rejectUnauthorized?: boolean };
+    return { db, tls: Boolean(ssl), verified: Boolean(ssl && (typeof ssl !== "object" || ssl.rejectUnauthorized !== false)) };
+  } catch (e) {
+    await db.end().catch(() => {});
+    throw e;
   }
 }
 

@@ -98,7 +98,7 @@ export const DEFS: Def[] = [
     sql: (c) => `select n.nspname || '.' || t.relname as "table", array_to_string(array_agg(ic.relname order by ic.relname), ', ') as indexes, count(*)::int as copies, sum(pg_relation_size(i.indexrelid))::bigint as bytes
       from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_class t on t.oid = i.indrelid join pg_namespace n on n.oid = t.relnamespace
       where ${us(c, "n.nspname")} and i.indisvalid
-      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
+      group by n.nspname, t.relname, i.indrelid, i.indkey::text, i.indnkeyatts, i.indclass::text, i.indcollation::text, i.indoption::text, i.indisunique, i.indisprimary, i.indimmediate, ${c.version >= 150000 ? "i.indnullsnotdistinct," : ""} ic.relam, coalesce(pg_get_expr(i.indpred, i.indrelid), ''), coalesce(pg_get_expr(i.indexprs, i.indrelid), '')
       having count(*) > 1 order by bytes desc limit 25` },
   { id: "i_fk", section: "indexes", title: "Foreign keys without a supporting index", source: "pg_constraint, pg_index", limit: 30,
     description: "Deleting or updating a referenced row must scan the referencing table. Without an index on the foreign-key columns that is a full scan (and can take long locks).",
@@ -292,6 +292,49 @@ export const DEFS: Def[] = [
            else coalesce(nullif(btrim(qual), ''), 'true') in ('true', '(true)') end as always_true,
       left(coalesce(qual, ''), 300) as using_expr, left(coalesce(with_check, ''), 300) as check_expr
       from pg_policies where ${us(c, "schemaname")} order by 5 desc, 1, 2 limit 60` },
+
+  { id: "s_policy_calls", section: "security", title: "Functions called by policies", source: "pg_policy, pg_proc", limit: 60,
+    description: "Each policy's expression, with the volatility of every function it names (i immutable, s stable, v volatile). PostgreSQL runs a stable or volatile function in a row filter once per row; a scalar sub-select with no outer references is evaluated once per query instead.",
+    columns: [C("table", "Table", "mono"), C("policy", "Policy", "mono"), C("cmd", "Command"), C("est_rows", "Est. rows", "int"), C("fn_vols", "Functions", "mono"), C("expr", "Expression", "mono")],
+    sql: (c) => `with pol as (
+        select n.nspname || '.' || t.relname as tbl, p.polname::text as policy, p.polcmd, t.reltuples::bigint as est_rows,
+          concat_ws(' ', pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)) as expr
+        from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+        where ${us(c, "n.nspname")} and t.relkind in ('r','p'))
+      select tbl as "table", policy, case polcmd when 'r' then 'SELECT' when 'a' then 'INSERT' when 'w' then 'UPDATE' when 'd' then 'DELETE' else 'ALL' end as cmd,
+        est_rows, left(expr, 2000) as expr,
+        (select string_agg(x.name || ':' || x.vol, ',' order by x.name) from (
+           select m.name, min(pr.provolatile::text) as vol
+           from (select distinct (regexp_matches(pol.expr, '([A-Za-z_][A-Za-z0-9_]*)\\s*\\(', 'g'))[1] as name) m
+           join pg_proc pr on pr.proname = m.name group by m.name) x) as fn_vols
+      from pol where expr ~ '\\(' order by est_rows desc, 1, 2 limit 60` },
+  { id: "s_policy_overlap", section: "security", title: "Policies stacked on one table", source: "pg_policy", limit: 60,
+    description: "Tables where more than one permissive policy applies to the same role and command. Permissive policies are combined with OR, so PostgreSQL evaluates each of them for every row it checks.",
+    columns: [C("table", "Table", "mono"), C("role", "Role", "mono"), C("cmd", "Command"), C("policies", "Policies", "int", { warn: 3, bad: 5 }), C("names", "Names", "mono")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", case when x.roleid = 0 then 'public' else r.rolname::text end as role, x.cmd, count(*)::int as policies, string_agg(x.polname::text, ', ' order by x.polname) as names
+      from (select p.polrelid, p.polname, unnest(case when p.polroles = '{0}'::oid[] then array[0::oid] else p.polroles end) as roleid, k.cmd
+              from pg_policy p, lateral (values ('SELECT', 'r'), ('INSERT', 'a'), ('UPDATE', 'w'), ('DELETE', 'd')) k(cmd, code)
+             where p.polpermissive and (p.polcmd = '*' or p.polcmd = k.code)) x
+      join pg_class t on t.oid = x.polrelid join pg_namespace n on n.oid = t.relnamespace left join pg_roles r on r.oid = x.roleid
+      where ${us(c, "n.nspname")} group by 1, 2, 3 having count(*) > 1 order by policies desc, 1 limit 60` },
+  { id: "s_policy_unindexed", section: "security", title: "Policy columns without an index", source: "pg_policy, pg_depend, pg_index", limit: 60,
+    description: "Columns a policy's expression reads on its own table, for tables of about 10,000 rows or more, where no index starts with that column. Without one, a policy that compares the column cannot use an index scan.",
+    columns: [C("table", "Table", "mono"), C("column", "Column", "mono"), C("policies", "Policies", "mono"), C("est_rows", "Est. rows", "int")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", a.attname::text as "column", string_agg(distinct p.polname::text, ', ') as policies, t.reltuples::bigint as est_rows
+      from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+      join pg_depend d on d.classid = 'pg_policy'::regclass and d.objid = p.oid and d.refclassid = 'pg_class'::regclass and d.refobjid = p.polrelid and d.refobjsubid > 0
+      join pg_attribute a on a.attrelid = p.polrelid and a.attnum = d.refobjsubid
+      where ${us(c, "n.nspname")} and t.relkind in ('r','p') and t.reltuples >= 10000
+        and not exists (select 1 from pg_index i where i.indrelid = p.polrelid and i.indisvalid and i.indkey[0] = a.attnum)
+      group by 1, 2, t.reltuples order by est_rows desc, 1, 2 limit 60` },
+  { id: "s_policy_lookups", section: "security", title: "Policies that read other tables", source: "pg_policy, pg_depend", limit: 60,
+    description: "Policies whose expression reads a different table, for example through EXISTS or IN. That read runs as part of every query on the protected table, and is itself subject to row-level security when the other table has it enabled.",
+    columns: [C("table", "Table", "mono"), C("policy", "Policy", "mono"), C("reads", "Reads", "mono"), C("reads_rls", "Read table has RLS", "bool")],
+    sql: (c) => `select n.nspname || '.' || t.relname as "table", p.polname::text as policy, string_agg(distinct rn.nspname || '.' || rt.relname, ', ') as reads, bool_or(rt.relrowsecurity) as reads_rls
+      from pg_policy p join pg_class t on t.oid = p.polrelid join pg_namespace n on n.oid = t.relnamespace
+      join pg_depend d on d.classid = 'pg_policy'::regclass and d.objid = p.oid and d.refclassid = 'pg_class'::regclass and d.refobjid <> p.polrelid
+      join pg_class rt on rt.oid = d.refobjid and rt.relkind in ('r','p','v','m') join pg_namespace rn on rn.oid = rt.relnamespace
+      where ${us(c, "n.nspname")} group by 1, 2 order by bool_or(rt.relrowsecurity) desc, 1, 2 limit 60` },
 
   // ───────── Extensions
   { id: "e_installed", section: "extensions", title: "Installed extensions", source: "pg_extension, pg_available_extensions", limit: 60,

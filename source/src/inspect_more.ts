@@ -16,7 +16,7 @@ export const MORE: Def[] = [
       greatest(last_analyze, last_autoanalyze) as last_analyzed, autoanalyze_count as autoanalyzes
       from pg_stat_user_tables where n_mod_since_analyze > 0 and ${us(c, "schemaname")} order by n_mod_since_analyze desc limit 25` },
   { id: "t_bloat", section: "tables", title: "Measured table bloat", source: "pgstattuple_approx()", limit: 15, ext: "pgstattuple",
-    hint: "Install pgstattuple to measure bloat instead of guessing: create extension pgstattuple; (the pg_monitor role can run it).",
+    hint: "Install pgstattuple to measure bloat instead of estimating: create extension pgstattuple; (the pg_monitor role can run it).",
     description: "Wasted space in the largest tables, measured with pgstattuple_approx (uses the visibility map, so it is cheap).",
     columns: [C("table", "Table", "mono"), C("bytes", "Size", "bytes"), C("dead_pct", "Dead", "pct"), C("free_pct", "Free space", "pct"), C("bloat_pct", "Bloat", "pct", { warn: 30, bad: 60 }), C("wasted_bytes", "Wasted", "bytes")],
     sql: (c) => `select n.nspname || '.' || t.relname as "table", pg_relation_size(t.oid) as bytes, round(a.dead_tuple_percent::numeric, 1) as dead_pct, round(a.approx_free_percent::numeric, 1) as free_pct,

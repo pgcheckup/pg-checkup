@@ -6,7 +6,6 @@ export interface Parsed { command: string; positionals: string[]; options: Recor
 export class UsageError extends Error {}
 
 const PROVIDERS = ['generic', 'supabase', 'neon'];
-const GOALS = ['performance', 'resize', 'readiness', 'incident'];
 const SEVERITIES = ['critical', 'warning', 'info'];
 const isUrl = (s: string) => /^postgres(ql)?:\/\//.test(s);
 const integer = (lo: number, hi: number) => (v: string) => {
@@ -51,7 +50,7 @@ function toOptions(o: Record<string, unknown>): Record<string, string | boolean>
     out[names[k] ?? k] = v as string | boolean;
   }
   if (out.md && out.json) throw new UsageError('--md and --json cannot be combined.');
-  if (out.json && out.upload) throw new UsageError('--json and --upload cannot be combined; upload the saved file separately.');
+  if (out.json && (out.upload || out.send)) throw new UsageError('--json cannot be combined with --upload or --send; upload the saved file separately.');
   return out;
 }
 
@@ -93,8 +92,8 @@ export function buildProgram(version: string, record: (p: Parsed) => void, quiet
     .description('run the checkup and save the statistics to a file (the default)')))
     .option('--include-query-text', 'keep SQL text in the file, with literals masked')
     .option('--upload', 'upload the saved file afterwards, for a shareable report')
+    .option('--send <code>', 'upload for the page that is waiting, with the one-time code shown on pgcheckup.com/scan')
     .addOption(new Option('--no-upload').hideHelp())
-    .addOption(new Option('--goal <goal>', 'with --upload: which decision report to open').choices(GOALS))
     .action((conn: string | undefined, _o, cmd: Command) => {
       if (conn !== undefined && !isUrl(conn)) throw new UsageError(`unknown command "${conn}". A connection is a postgres:// URL; run pg-checkup --help for the commands.`);
       done('scan', conn ? [conn] : [], cmd);
@@ -109,8 +108,12 @@ export function buildProgram(version: string, record: (p: Parsed) => void, quiet
   program.command('sql').description('print every query the checkup runs, in order')
     .addOption(new Option('--provider <provider>', 'the queries as run for this provider').choices(PROVIDERS))
     .action((_o, cmd: Command) => done('sql', [], cmd));
+  program.command('schedule').description('print a ready-made schedule (GitHub Actions, or a cron line) that runs the checkup and uploads it')
+    .addOption(new Option('--every <interval>', 'how often').choices(['daily', 'weekly']).default('weekly'))
+    .option('--cron', 'print a crontab line instead of a GitHub Actions file')
+    .option('--write', 'write .github/workflows/pg-checkup.yml (never overwrites)')
+    .action((_o, cmd: Command) => done('schedule', [], cmd));
   program.command('upload').description('send a saved file to pgcheckup.com for a shareable report').argument('<file>')
-    .addOption(new Option('--goal <goal>', 'which decision report to open').choices(GOALS))
     .option('-y, --yes', 'upload without asking')
     .action((file: string, _o, cmd: Command) => done('upload', [file], cmd));
   program.command('delete').description('remove an uploaded report').argument('<receipt>', 'the receipt file written by upload')

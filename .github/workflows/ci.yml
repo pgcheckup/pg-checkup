@@ -62,24 +62,31 @@ jobs:
         run: |
           node dist/pg-checkup.js -h 127.0.0.1 -U postgres -d postgres --strict --no-pace --no-color -o su.json > /dev/null
 
-      - name: A privileged login on a remote host is refused (0.0.0.0 reaches the same server but is not localhost)
+      - name: A privileged login on a remote host is refused (0.0.0.0 reaches the same server but is not localhost; TLS is off because the CI server has none)
         env: { PGPASSWORD: admin }
         run: |
           set +e
-          node dist/pg-checkup.js -h 0.0.0.0 -U postgres -d postgres --no-pace --no-color -o refused.json
+          PGSSLMODE=disable node dist/pg-checkup.js -h 0.0.0.0 -U postgres -d postgres --no-pace --no-color -o refused.json 2> refused.err
           code=$?
           set -e
+          cat refused.err
           test "$code" -eq 3
+          grep -q "more access than a checkup needs" refused.err
           test ! -f refused.json
 
       - name: Exit codes for CI
         env: { PGPASSWORD: reader }
         run: |
-          set +e
-          node dist/pg-checkup.js show reader.json --fail-on info --no-pace > /dev/null; test $? -eq 1
-          node dist/pg-checkup.js --bogus; test $? -eq 2
-          node dist/pg-checkup.js show nope.json; test $? -eq 2
-          set -e
+          expect_exit() {
+            expected=$1
+            shift
+            code=0
+            "$@" || code=$?
+            test "$code" -eq "$expected"
+          }
+          expect_exit 1 node dist/pg-checkup.js show reader.json --fail-on info --no-pace > /dev/null
+          expect_exit 2 node dist/pg-checkup.js --bogus
+          expect_exit 2 node dist/pg-checkup.js show nope.json
 
       - name: Password never in the saved file or the output
         env: { PGPASSWORD: reader }

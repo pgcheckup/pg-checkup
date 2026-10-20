@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, statSync, mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -20,6 +20,7 @@ import { buildProgram, normalizeArgv, terminalText, UsageError as OptionError, t
 import { CommanderError } from 'commander';
 import { observe, parseWindow, compareWorkloads, workloadText, WINDOW_FORMAT, WORKLOAD_SQL, WINDOW_META_SQL } from './workload.js';
 import type { ProviderId } from './provider.js';
+import { githubWorkflow, crontabLine, SCHEDULE_NOTES, type Every } from './schedule.js';
 
 // Commander prints help and usage errors itself; a usage error exits 2, help and --version exit 0.
 const parsed: Parsed = (() => {
@@ -155,7 +156,7 @@ async function printReport(r: RunResult, b: Bundle, file?: string) {
   const na = r.checks.length - active.length;
   const version = b.server.version.split(' on ')[0].split(',')[0];
   const sev = SEV_RANK.map((x) => count(x)).some(Boolean) ? SEV_RANK.filter((x) => count(x)).map((x) => ink(SEV_INK[x], `${count(x)} ${x}`)).join(dim(' · ')) : ink(32, 'nothing flagged');
-  out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ''}  ${dim(`${active.length} checks:`)} ${sev}`);
+  out(`${bold(version)}${b.hosting ? dim(`  ${b.hosting}`) : ''}  ${sev}`);
   // Enough time to read each finding, but never more than about five seconds in total.
   const step = Math.min(450, Math.round(5000 / Math.max(findings.length, 1)));
   if (findings.length > 1) out(`${dim('Start here:')} ${findings[0].title}`);
@@ -245,10 +246,13 @@ async function upload(text: string, file: string) {
   const b = parseBundle(JSON.parse(text));
   const rows = b.datasets.reduce((n, d) => n + d.rows.length, 0);
   say(`This sends ${file} (${(Buffer.byteLength(text) / 1024).toFixed(0)} KB: ${rows} rows of statistics, ${b.queryText === 'removed' ? 'no SQL text' : 'masked SQL text'}, no table data) to ${HOST}.`);
+  const code = opt('send');
+  if (code !== undefined && !/^[a-f0-9]{32}$/.test(code)) throw new Error('--send needs the code shown on pgcheckup.com/scan. Copy the whole command from the page.');
   say(token ? `Saved to your account (PGCHECKUP_TOKEN is set). On the plan it is a full report with fix SQL, kept, and compared with your last checkup of this database.` : `You get the same findings as a shareable web page with the evidence tables. Kept 7 days under an unguessable link; anyone with the link can read it. "pg-checkup delete" removes it. Set PGCHECKUP_TOKEN (Settings on the site) to save it to your account.`);
-  if (!await confirm('Upload? [y/N] ')) { say('Not uploaded.'); return; }
+  if (code) say('Sending it because you passed --send; the page that showed the code opens the report.');
+  else if (!await confirm('Upload? [y/N] ')) { say('Not uploaded.'); return; }
   say(`Uploading…`);
-  const res = await fetch(`${SITE}/api/bundle`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: text, signal: AbortSignal.timeout(60000), redirect: 'error' });
+  const res = await fetch(`${SITE}/api/bundle`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...(code ? { 'x-pgcheckup-handoff': code } : {}) }, body: text, signal: AbortSignal.timeout(60000), redirect: 'error' });
   const r = await res.json() as { url?: string; id?: string; key?: string; sha256?: string; error?: string; account?: string; full?: boolean; previous?: string };
   if (!res.ok || !r.url || !r.id || !r.key) throw new Error(`Upload refused: ${r.error ?? res.status}. Your local file is unchanged.`);
   if (new URL(r.url).origin !== new URL(SITE).origin) throw new Error('The server returned a report on a different origin. Check PGCHECKUP_URL.');
@@ -256,7 +260,6 @@ async function upload(text: string, file: string) {
   writeFileSync(receipt, json({ report: r.url, id: r.id, deleteKey: r.key, sha256: sha(text), uploadedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
   if (r.sha256 !== sha(text)) throw new Error(`The server's hash does not match your file. Treat the upload as unverified: pg-checkup delete ${quote(receipt)} removes it.`);
   const report = new URL(r.url);
-  if (opt('goal')) report.searchParams.set('goal', opt('goal')!);
   if (flag('json')) out(json({ report: String(report), receipt, sha256: r.sha256, ...(r.account ? { account: r.account, full: Boolean(r.full) } : {}) }));
   else {
     out(`Report:  ${report}`);
@@ -284,7 +287,7 @@ async function scan() {
   });
   if (process.stderr.isTTY && !flag('json')) process.stderr.write('\r\x1b[K');
   say(`Connected ${tls ? (verified ? 'with TLS, certificate verified' : 'with TLS, certificate not verified') : 'without TLS'}${allowPrivilegedRole ? ', privileged-role check skipped' : ''}; read ${b.datasets.length} statistics views in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
-  if (tls && !verified && !local) say(`The server's certificate is not signed by a CA this machine trusts. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
+  if (tls && !verified && !local) say(`Certificate verification is disabled for this connection. To require verification: sslmode=verify-full in the URL, and PGSSLROOTCERT=path to your provider's CA file.`);
   if (flag('include-query-text')) say('SQL text is kept with literals masked. Comments and identifiers can still be sensitive; read the file before sharing.');
   const saved = save(b, `pg-checkup-${safeName(c.database)}`, c.password);
   const r = await analyze(b, { provider });
@@ -293,12 +296,26 @@ async function scan() {
   if (flag('md')) { say(`Saved ${saved.file}`); process.stdout.write(markdown(r, b)); return code; }
   out();
   await printReport(r, b, saved.file);
-  if (flag('upload')) { out(); await upload(saved.text, saved.file); }
+  if (flag('upload') || opt('send')) { out(); await upload(saved.text, saved.file); }
   return code;
 }
 
 async function main(): Promise<number> {
   if (cmd === 'role') { out(MONITOR_ROLE_SQL); return 0; }
+  if (cmd === 'schedule') {
+    const every = (opt('every') === 'daily' ? 'daily' : 'weekly') as Every;
+    if (flag('cron')) { out(crontabLine(every)); for (const n of SCHEDULE_NOTES('cron')) say(n); return 0; }
+    const yaml = githubWorkflow(every);
+    if (flag('write')) {
+      const path = '.github/workflows/pg-checkup.yml';
+      if (existsSync(path)) throw new Error(`${path} already exists; it was not changed.`);
+      mkdirSync('.github/workflows', { recursive: true });
+      writeFileSync(path, yaml, { flag: 'wx' });
+      say(`Wrote ${path}. Add the two secrets it lists, commit it, and run it once from the Actions tab.`);
+    } else out(yaml);
+    for (const n of SCHEDULE_NOTES('github')) say(n);
+    return 0;
+  }
   if (cmd === 'sql') {
     for (const s of statements(provider)) out(`-- ${s.id}: ${s.title}\n${s.sql};\n`);
     out(`-- Observation metadata and counters (PostgreSQL 14+)\n${WINDOW_META_SQL};\n${WORKLOAD_SQL};`);
