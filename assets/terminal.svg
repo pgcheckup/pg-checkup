@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="509" viewBox="0 0 860 509" role="img" aria-label="pg-checkup output: findings listed as fix next and watch, each with why it matters and how to fix it.">
+<rect width="860" height="509" rx="12" fill="#0a0a0a" stroke="#262626"/>
+<circle cx="22" cy="18" r="5" fill="#ff5f57"/><circle cx="40" cy="18" r="5" fill="#febc2e"/><circle cx="58" cy="18" r="5" fill="#28c840"/>
+<text x="24" y="58" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#9b9b9b" xml:space="preserve">$ npx pg-checkup postgres://checkup_reader@db.example.com/app</text>
+<text x="24" y="100" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" font-weight="600" fill="#ededed" xml:space="preserve">PostgreSQL 17.5  5 warning · 7 info</text>
+<text x="24" y="121" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">Start here: 1 table has more than 20% dead rows</text>
+<text x="24" y="163" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" font-weight="600" fill="#facc15" xml:space="preserve">FIX NEXT  5</text>
+<text x="24" y="184" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#facc15">!</text><text x="40" y="184" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#ededed"> 1 table has more than 20% dead rows</text>
+<text x="836" y="184" text-anchor="end" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">Vacuum &amp; bloat</text>
+<text x="24" y="205" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    Why: Dead rows waste disk and slow scans; autovacuum isn't keeping up.</text>
+<text x="24" y="226" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    Fix: Remove vacuum blockers, lower autovacuum_vacuum_scale_factor on hot tables,</text>
+<text x="24" y="247" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    run VACUUM (VERBOSE).</text>
+<text x="24" y="268" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#facc15">!</text><text x="40" y="268" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#ededed"> 1 row-level security policy calls a function once per row</text>
+<text x="836" y="268" text-anchor="end" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">Security</text>
+<text x="24" y="289" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    Why: PostgreSQL runs a stable or volatile function in a row filter once for every</text>
+<text x="24" y="310" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    row it checks. Inside a scalar sub-select it runs once per query.</text>
+<text x="24" y="331" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">    Fix: Wrap the call: USING (owner_id = (SELECT my_fn())).</text>
+<text x="24" y="373" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" font-weight="600" fill="#facc15" xml:space="preserve">WATCH  7</text>
+<text x="24" y="394" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">·</text><text x="40" y="394" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#ededed"> 1 table has no primary key</text>
+<text x="836" y="394" text-anchor="end" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">Tables</text>
+<text x="24" y="415" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">·</text><text x="40" y="415" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#ededed"> WAL archiving is off</text>
+<text x="836" y="415" text-anchor="end" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6b6b6b">Backups &amp; recovery</text>
+<text x="24" y="436" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">...</text>
+<text x="24" y="478" font-family="ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#a3a3a3" xml:space="preserve">72 checks passed, 2 skipped, 5 not applicable here. -v lists them.</text>
+</svg>

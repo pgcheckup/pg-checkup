@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="268" height="48" viewBox="0 0 268 48" role="img" aria-label="pg-checkup">
+  <rect width="48" height="48" rx="12" fill="#c2410c"/>
+  <path d="M7 24H16L20 14L26 34L30 24H41" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="66" y="25" dominant-baseline="central" font-family="Geist, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="30" font-weight="600" letter-spacing="-1" fill="#0b0d12">pg-checkup</text>
+</svg>

@@ -1,34 +1,32 @@
-# pg-checkup
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pgcheckup/pg-checkup/main/assets/logo-dark.svg">
+    <img src="https://raw.githubusercontent.com/pgcheckup/pg-checkup/main/assets/logo-light.svg" alt="pg-checkup" height="48">
+  </picture>
+</p>
 
-Read-only checkup for PostgreSQL. It reads what the database records about itself and tells you what to fix first, why, and how.
+<p align="center">Read-only checkup for PostgreSQL. It tells you what to fix first, why, and how.</p>
 
-[Features](#features) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Commands](#commands) · [What it will not do](#what-it-will-not-do) · [More](#more)
+<p align="center">
+  <a href="https://pgcheckup.com">Website</a> ·
+  <a href="https://pgcheckup.com/docs/local">Docs</a> ·
+  <a href="https://pgcheckup.com/docs/checks">Checks</a> ·
+  <a href="https://github.com/pgcheckup/pg-checkup/issues">Issues</a>
+</p>
 
-```
-$ npx pg-checkup postgres://checkup_reader@db.example.com/app
+<p align="center">
+  <a href="https://github.com/pgcheckup/pg-checkup/actions/workflows/ci.yml"><img src="https://github.com/pgcheckup/pg-checkup/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A518-3c873a" alt="Node 18 or newer">
+  <img src="https://img.shields.io/badge/PostgreSQL-12%20to%2017-336791" alt="PostgreSQL 12 to 17">
+</p>
 
-PostgreSQL 17.5  5 warning · 7 info
-Start here: 1 table has more than 20% dead rows
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pgcheckup/pg-checkup/main/assets/terminal.svg" alt="pg-checkup output: findings listed as fix next and watch, each with why it matters and how to fix it" width="860">
+</p>
 
-FIX NEXT
-! 1 table has more than 20% dead rows  Vacuum & bloat
-    Why: Dead rows waste disk and slow scans; autovacuum isn't keeping up.
-    Fix: Remove vacuum blockers, lower autovacuum_vacuum_scale_factor on hot tables,
-    run VACUUM (VERBOSE).
-! 1 row-level security policy calls a function once per row  Security
-    Why: PostgreSQL runs a stable or volatile function in a row filter once for every
-    row it checks. Inside a scalar sub-select it runs once per query.
-    Fix: Wrap the call: USING (owner_id = (SELECT my_fn())).
+`✗` fix now · `!` fix next · `·` watch. Findings are listed in the order to fix them, and a cause comes before its effects.
 
-WATCH
-· 1 table has no primary key  Tables
-· WAL archiving is off  Backups & recovery
-...
-```
-
-`✗` fix now, `!` fix next, `·` watch. Findings are listed in the order to fix them, and a cause comes before its effects.
-
-## Features
+## Highlights
 
 - **No score.** Fix now, fix next, watch.
 - **Findings read together.** When one problem causes another, the cause is listed first.
@@ -57,17 +55,12 @@ On a remote database, a login with more access than that is refused. Remote conn
 
 ## How it works
 
-```
- your database                your machine                          optional
- -------------                ------------                          --------
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pgcheckup/pg-checkup/main/assets/how-it-works-dark.svg">
+  <img src="https://raw.githubusercontent.com/pgcheckup/pg-checkup/main/assets/how-it-works-light.svg" alt="pg-checkup reads statistics views from your database with read-only SELECTs, runs on your machine, prints findings in your terminal, and uploads a statistics file only if you ask" width="924">
+</picture>
 
- pg_stat_* views --SELECTs--> pg-checkup --> terminal: fix now, fix next, watch
- pg_catalog      (read-only)      |
- (no table rows)                  +--------> checkup.json --upload--> pgcheckup.com
-                                             (statistics only)        (shareable report)
-```
-
-Nothing leaves your machine unless you run `upload`. The saved file holds statistics, settings, and schema and role names. It never holds table rows or the connection string.
+The saved file holds statistics, settings, and schema and role names. It never holds table rows or the connection string.
 
 ## Commands
 
@@ -92,6 +85,4 @@ Exit code 1 means a `--fail-on` match or a regression. Exit code 3 means the log
 
 ## More
 
-[Run it on your machine](https://pgcheckup.com/docs/local) · [GitHub & CI](https://pgcheckup.com/docs/ci) · [AI assistants](https://pgcheckup.com/docs/mcp) · [Checks reference](https://pgcheckup.com/docs/checks)
-
-License: see `LICENSE`.
+[Run it on your machine](https://pgcheckup.com/docs/local) · [GitHub & CI](https://pgcheckup.com/docs/ci) · [AI assistants](https://pgcheckup.com/docs/mcp) · [Checks reference](https://pgcheckup.com/docs/checks) · License: see `LICENSE`.
