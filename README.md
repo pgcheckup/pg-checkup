@@ -2,6 +2,8 @@
 
 Read-only checkup for PostgreSQL. It reads what the database records about itself and tells you what to fix first, why, and how.
 
+[Features](#features) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Commands](#commands) · [What it will not do](#what-it-will-not-do) · [More](#more)
+
 ```
 $ npx pg-checkup postgres://checkup_reader@db.example.com/app
 
@@ -24,15 +26,17 @@ WATCH
 ...
 ```
 
+`✗` fix now, `!` fix next, `·` watch. Findings are listed in the order to fix them, and a cause comes before its effects.
+
 ## Features
 
-- **In the order to fix them.** Fix now, fix next, watch. No score.
-- **Findings read together.** When one problem causes another, the cause comes first.
-- **Read-only and local.** The session cannot write, table rows are never read, and nothing is sent anywhere unless you run `upload`.
+- **No score.** Fix now, fix next, watch.
+- **Findings read together.** When one problem causes another, the cause is listed first.
+- **Read-only and local.** The session cannot write, and table rows are never read.
 - **Honest about thin evidence.** A database that just started needs another run under real traffic, and it says so.
-- **Before and after.** Compare two checkups to see what was fixed, what is new, and what changed.
-- **Any PostgreSQL 12 or newer.** Tested on Neon, Supabase and Railway; other hosts are treated as plain PostgreSQL.
-- **Runs in CI and from your AI assistant.** `--fail-on warning`, scheduled runs, and an MCP server.
+- **Before and after.** Compare two checkups: what was fixed, what is new, what changed.
+- **PostgreSQL 12 and newer.** Tested on Neon, Supabase and Railway; other hosts are treated as plain PostgreSQL.
+- **CI and AI assistants.** `--fail-on warning`, scheduled runs, and an MCP server.
 
 ## Quick start
 
@@ -42,7 +46,7 @@ npx pg-checkup postgres://checkup_reader@host/db
 
 Needs Node 18 or newer. Connect the way you do with `psql`: a URL, `-h -U -d`, the `PG*` variables, or `DATABASE_URL` in `.env`. The password comes from the URL, `PGPASSWORD`, `~/.pgpass`, or a prompt.
 
-Use a login that can read statistics and nothing else:
+Use a login that can read statistics and nothing else (`pg-checkup role` prints this):
 
 ```sql
 create role checkup_reader login password '...';
@@ -50,6 +54,20 @@ grant pg_monitor to checkup_reader;
 ```
 
 On a remote database, a login with more access than that is refused. Remote connections need TLS with a verified certificate; for a provider with its own CA, set `PGSSLROOTCERT=ca.pem`.
+
+## How it works
+
+```
+ your database                your machine                          optional
+ -------------                ------------                          --------
+
+ pg_stat_* views --SELECTs--> pg-checkup --> terminal: fix now, fix next, watch
+ pg_catalog      (read-only)      |
+ (no table rows)                  +--------> checkup.json --upload--> pgcheckup.com
+                                             (statistics only)        (shareable report)
+```
+
+Nothing leaves your machine unless you run `upload`. The saved file holds statistics, settings, and schema and role names. It never holds table rows or the connection string.
 
 ## Commands
 
@@ -64,7 +82,7 @@ pg-checkup schedule --write   run it weekly on GitHub Actions
 pg-checkup upload FILE        optional: a shareable web report
 ```
 
-Exit code 1 means a `--fail-on` match or a regression, 3 means the login has too much access.
+Exit code 1 means a `--fail-on` match or a regression. Exit code 3 means the login has too much access.
 
 ## What it will not do
 
@@ -74,4 +92,6 @@ Exit code 1 means a `--fail-on` match or a regression, 3 means the login has too
 
 ## More
 
-[Run it on your machine](https://pgcheckup.com/docs/local) · [GitHub & CI](https://pgcheckup.com/docs/ci) · [AI assistants](https://pgcheckup.com/docs/mcp) · [Checks reference](https://pgcheckup.com/docs/checks) · License: see `LICENSE`.
+[Run it on your machine](https://pgcheckup.com/docs/local) · [GitHub & CI](https://pgcheckup.com/docs/ci) · [AI assistants](https://pgcheckup.com/docs/mcp) · [Checks reference](https://pgcheckup.com/docs/checks)
+
+License: see `LICENSE`.
